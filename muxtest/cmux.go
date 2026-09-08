@@ -21,8 +21,8 @@ type FakeCmuxState struct {
 	Workspaces    []FakeCmuxWorkspace
 	Sessions      []FakeCmuxSession
 	Notifications []FakeCmuxNote
-	Top           map[string]FakeCmuxTop // workspace id → what runs there
-	Typed         map[string][]string    // surface id → text and keys, in order
+	PS            FakePS              // tty → foreground commands
+	Typed         map[string][]string // surface id → text and keys, in order
 	Calls         []string
 	Selected      string // workspace id
 	Focused       string // window ref
@@ -47,9 +47,11 @@ type FakeCmuxPane struct {
 	Surfaces []FakeCmuxSurface
 }
 
-// FakeCmuxSurface is one terminal surface.
+// FakeCmuxSurface is one terminal surface. TTY is set for the surface
+// a workspace was created with, as in cmux, and empty for a tab or
+// split made through the API.
 type FakeCmuxSurface struct {
-	ID, Ref, Title string
+	ID, Ref, Title, TTY string
 }
 
 // FakeCmuxSession mirrors a `sessions --agent claude` record.
@@ -66,11 +68,10 @@ type FakeCmuxNote struct {
 	Read      bool   `json:"is_read"`
 }
 
-// FakeCmuxTop is what `top` attributes to a workspace's first pane.
-type FakeCmuxTop struct {
-	Agents    []string // coding agents cmux detected
-	Processes []string // process names, filed under the pane's first surface
-}
+// FakePS is a fake process table: per tty, the foreground command
+// names. InstallFakeCmux puts a `ps` on PATH that prints it in the
+// form the driver reads (`tty stat comm`).
+type FakePS map[string][]string
 
 func (w FakeCmuxWorkspace) name() string {
 	if w.HasCustom {
@@ -86,8 +87,8 @@ func loadFakeCmux() FakeCmuxState {
 	if data, err := os.ReadFile(fakeCmuxStatePath()); err == nil {
 		_ = json.Unmarshal(data, &st)
 	}
-	if st.Top == nil {
-		st.Top = map[string]FakeCmuxTop{}
+	if st.PS == nil {
+		st.PS = FakePS{}
 	}
 	if st.Typed == nil {
 		st.Typed = map[string][]string{}
@@ -165,15 +166,50 @@ func FakeCmuxMain(args []string) int {
 	switch {
 	case verb == "ping":
 		fmt.Println("PONG")
+	case verb == "tree" && opts["--all"] == "true":
+		type surface struct {
+			ID    string `json:"id"`
+			Ref   string `json:"ref"`
+			Title string `json:"title"`
+			TTY   string `json:"tty"`
+		}
+		type pane struct {
+			Ref         string    `json:"ref"`
+			SurfaceIDs  []string  `json:"surface_ids"`
+			SurfaceRefs []string  `json:"surface_refs"`
+			Surfaces    []surface `json:"surfaces"`
+		}
+		type workspace struct {
+			ID    string `json:"id"`
+			Ref   string `json:"ref"`
+			Title string `json:"title"`
+			Panes []pane `json:"panes"`
+		}
+		var wss []workspace
+		for _, w := range st.Workspaces {
+			x := workspace{ID: w.ID, Ref: w.Ref, Title: w.name()}
+			for _, p := range w.Panes {
+				y := pane{Ref: p.Ref}
+				for _, s := range p.Surfaces {
+					y.SurfaceIDs, y.SurfaceRefs = append(y.SurfaceIDs, s.ID), append(y.SurfaceRefs, s.Ref)
+					y.Surfaces = append(y.Surfaces, surface(s))
+				}
+				x.Panes = append(x.Panes, y)
+			}
+			wss = append(wss, x)
+		}
+		return out(map[string]any{"windows": []map[string]any{{"ref": "window:1", "workspaces": wss}}})
 	case verb == "workspace list":
 		return out(map[string]any{"window_ref": "window:1", "workspaces": st.Workspaces})
 	case verb == "workspace create":
 		st.Next++
 		w := FakeCmuxWorkspace{ID: fmt.Sprintf("WS-%d", st.Next), Ref: fmt.Sprintf("workspace:%d", st.Next), Title: opts["--name"], CustomTitle: opts["--name"], HasCustom: opts["--name"] != "", Cwd: opts["--cwd"]}
-		w.Panes = []FakeCmuxPane{{Ref: fmt.Sprintf("pane:%d", st.Next), Surfaces: []FakeCmuxSurface{newSurface(w.name())}}}
+		root := newSurface(w.name())
+		root.TTY = fmt.Sprintf("ttys%03d", st.Next)
+		w.Panes = []FakeCmuxPane{{Ref: fmt.Sprintf("pane:%d", st.Next), Surfaces: []FakeCmuxSurface{root}}}
 		st.Workspaces = append(st.Workspaces, w)
 		fmt.Println("OK " + w.Ref)
-	case verb == "workspace select", verb == "workspace close", verb == "mark-notification-read", verb == "list-panes", verb == "list-pane-surfaces", verb == "new-surface", strings.HasPrefix(verb, "top"):
+	case verb == "workspace select", verb == "workspace close", verb == "mark-notification-read", verb == "list-panes", verb == "list-pane-surfaces", verb == "new-surface":
 		i, ok := find(opts["--workspace"])
 		if !ok {
 			return fail("no such workspace " + opts["--workspace"])
@@ -225,21 +261,6 @@ func FakeCmuxMain(args []string) int {
 			s := newSurface("Terminal")
 			st.Workspaces[i].Panes[pi].Surfaces = append(st.Workspaces[i].Panes[pi].Surfaces, s)
 			fmt.Printf("OK %s %s %s\n", s.Ref, w.Panes[pi].Ref, w.Ref)
-		default: // top
-			top := st.Top[w.ID]
-			first := w.Panes[0].Surfaces[0].Ref
-			if opts["--format"] == "tsv" {
-				fmt.Printf("0.0\t1\t1\tworkspace\t%s\twindow:1\t%s\n", w.Ref, w.name())
-				for k, p := range top.Processes {
-					fmt.Printf("0.0\t1\t1\tprocess\t%d\t%s\t%s\n", 1000+k, first, p)
-				}
-				return 0
-			}
-			agents := []map[string]string{}
-			for _, a := range top.Agents {
-				agents = append(agents, map[string]string{"id": a})
-			}
-			return out(map[string]any{"coding_agents": agents})
 		}
 	case len(words) == 2 && words[0] == "new-split":
 		wi, _, _, ok := surface(opts["--surface"])
@@ -309,6 +330,11 @@ func InstallFakeCmux(t *testing.T) *FakeCmux {
 	if err := os.Symlink(self, filepath.Join(bin, "cmux")); err != nil {
 		t.Fatal(err)
 	}
+	// ps prints the fake process table, in the driver's format.
+	ps := "#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done < \"$" + FakeCmuxEnv + "/ps.txt\" 2>/dev/null; exit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "ps"), []byte(ps), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(FakeCmuxEnv, dir)
 	t.Setenv("CMUX_WORKSPACE_ID", "")
@@ -353,7 +379,7 @@ func (f *FakeCmux) AddWorkspace(name, id string) {
 		if name == "" {
 			w.Title = "~"
 		}
-		w.Panes = []FakeCmuxPane{{Ref: fmt.Sprintf("pane:%d", st.Next), Surfaces: []FakeCmuxSurface{{ID: "SF-" + id, Ref: fmt.Sprintf("surface:%d", st.Next), Title: w.Title}}}}
+		w.Panes = []FakeCmuxPane{{Ref: fmt.Sprintf("pane:%d", st.Next), Surfaces: []FakeCmuxSurface{{ID: "SF-" + id, Ref: fmt.Sprintf("surface:%d", st.Next), Title: w.Title, TTY: fmt.Sprintf("ttys%03d", st.Next)}}}}
 		st.Workspaces = append(st.Workspaces, w)
 	})
 }
@@ -372,11 +398,37 @@ func (f *FakeCmux) AddNote(workspaceID string, read bool) {
 	})
 }
 
-// SetTop sets what top attributes to the workspace's first pane.
-func (f *FakeCmux) SetTop(name string, agents, processes []string) {
-	w, ok := f.Workspace(name)
-	if !ok {
-		f.t.Fatalf("no workspace %q", name)
+// SetForeground sets the foreground commands on a tty, what the fake
+// ps reports; the surface a workspace was created with has one.
+func (f *FakeCmux) SetForeground(tty string, commands ...string) {
+	f.Edit(func(st *FakeCmuxState) { st.PS[tty] = commands })
+	f.writePS()
+}
+
+// SetTitle sets a surface's title, what cmux's shell integration
+// reports: the running program, or the directory at a prompt.
+func (f *FakeCmux) SetTitle(surfaceID, title string) {
+	f.Edit(func(st *FakeCmuxState) {
+		for wi := range st.Workspaces {
+			for pi := range st.Workspaces[wi].Panes {
+				for si := range st.Workspaces[wi].Panes[pi].Surfaces {
+					if st.Workspaces[wi].Panes[pi].Surfaces[si].ID == surfaceID {
+						st.Workspaces[wi].Panes[pi].Surfaces[si].Title = title
+					}
+				}
+			}
+		}
+	})
+}
+
+// writePS renders the process table for the fake ps.
+func (f *FakeCmux) writePS() {
+	st := f.State()
+	var b strings.Builder
+	for tty, cmds := range st.PS {
+		for _, c := range cmds {
+			fmt.Fprintf(&b, "%s S+ %s\n", tty, c)
+		}
 	}
-	f.Edit(func(st *FakeCmuxState) { st.Top[w.ID] = FakeCmuxTop{Agents: agents, Processes: processes} })
+	_ = os.WriteFile(filepath.Join(f.dir, "ps.txt"), []byte(b.String()), 0o644)
 }

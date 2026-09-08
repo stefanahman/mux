@@ -289,7 +289,7 @@ func TestHerdrUnreachable(t *testing.T) {
 func TestCmux(t *testing.T) {
 	fake := muxtest.InstallFakeCmux(t)
 	fake.AddWorkspace("", "HOME")
-	d := mux.Cmux{}
+	d := mux.NewCmux()
 	if err := d.Prepare("/repo"); err != nil {
 		t.Fatal(err)
 	}
@@ -357,27 +357,75 @@ func TestCmux(t *testing.T) {
 		t.Errorf("Layout() = %v, %v", tabs, err)
 	}
 
-	cases := []struct {
-		agents, processes []string
-		atShell           bool
+	// The surface a workspace was created with has a tty: ps says what
+	// runs in its foreground. A tab made through the API has none, and
+	// its title does — the program, or the directory at a prompt.
+	rootTTY := fw.Panes[0].Surfaces[0].TTY
+	for _, c := range []struct {
+		fg      []string
+		atShell bool
 	}{
-		{nil, nil, true},                         // an idle shell top may not list at all
-		{nil, []string{"zsh"}, true},             // the login shell
-		{nil, []string{"2.1.263", "zsh"}, false}, // Claude's process is named after its version
-		{[]string{"claude"}, []string{"zsh"}, false},
-	}
-	for _, c := range cases {
-		fake.SetTop("pr-42-fix", c.agents, c.processes)
+		{nil, true},
+		{[]string{"-/bin/zsh"}, true},
+		{[]string{"-/bin/zsh", "/Users/x/.local/bin/claude", "node"}, false},
+		{[]string{"nvim"}, false},
+	} {
+		fake.SetForeground(rootTTY, c.fg...)
+		d := mux.NewCmux() // a run of its own: the snapshot is per run
 		if got := d.AtShell(ws, pane); got != c.atShell {
-			t.Errorf("AtShell with agents %v, processes %v = %v", c.agents, c.processes, got)
+			t.Errorf("AtShell with %v in the foreground = %v", c.fg, got)
 		}
-		// The tab shares the pane, and its attribution.
+	}
+	for _, c := range []struct {
+		title    string
+		atShell  bool
+		programs []string
+	}{
+		{"Terminal", true, nil},
+		{"~/Development/eden", true, nil},
+		{"…/Development/bardo/bardo-system", true, nil},
+		{"/tmp", true, nil},
+		{"nvim", false, []string{"nvim"}},
+		{"cd /Users/x/src && nvim", false, []string{"cd", "src", "&&", "nvim"}},
+		{"✳ Claude Code", false, []string{"✳", "Claude", "Code"}},
+	} {
+		fake.SetTitle(tab.ID, c.title)
+		d := mux.NewCmux()
 		if got := d.AtShell(ws, tab); got != c.atShell {
-			t.Errorf("AtShell on the tab with agents %v, processes %v = %v", c.agents, c.processes, got)
+			t.Errorf("AtShell on a tab titled %q = %v", c.title, got)
+		}
+		if got, _ := d.Processes(ws, tab); !reflect.DeepEqual(got, c.programs) {
+			t.Errorf("Processes on a tab titled %q = %v, want %v", c.title, got, c.programs)
 		}
 	}
 	if ps, _ := d.Processes(ws, right); len(ps) != 0 {
-		t.Errorf("the split pane has nothing attributed: %v", ps)
+		t.Errorf("a fresh split is at its prompt: %v", ps)
+	}
+
+	// Reads come from a snapshot: a run over every workspace costs the
+	// three commands, not three per workspace; a change refreshes it.
+	before := len(fake.Calls())
+	for _, w := range func() []mux.Workspace { l, _ := d.Workspaces(); return l }() {
+		if _, err := d.Layout(w); err != nil {
+			t.Fatal(err)
+		}
+		d.AtShell(w, mux.Pane{ID: fw.Panes[0].Surfaces[0].ID})
+	}
+	if n := len(fake.Calls()) - before; n > 3 {
+		t.Errorf("reading two workspaces took %d commands, want at most 3", n)
+	}
+	fake.AddWorkspace("pr-9-late", "W9")
+	if l, _ := d.Workspaces(); len(l) != 2 {
+		t.Errorf("a snapshot is kept until the driver changes something: %d workspaces, want the 2 it knew", len(l))
+	}
+	if err := d.Run(ws, pane, "true"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := d.Workspaces(); len(l) != 3 {
+		t.Errorf("after a change the snapshot is fresh: %d workspaces, want 3", len(l))
+	}
+	if err := d.Close(mux.Workspace{ID: "W9", Name: "pr-9-late"}); err != nil {
+		t.Fatal(err)
 	}
 
 	for i, name := range []string{"pr-1-working", "pr-2-blocked", "pr-3-done", "pr-4-idle", "pr-5-stale", "pr-6-none"} {
@@ -401,8 +449,14 @@ func TestCmux(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := fake.State()
-	if st.Selected != ws.ID || !st.Notifications[len(st.Notifications)-1].Read {
-		t.Errorf("after Select: selected %q, last note read %v", st.Selected, st.Notifications[len(st.Notifications)-1].Read)
+	if st.Selected != ws.ID || st.Notifications[len(st.Notifications)-1].Read {
+		t.Errorf("after Select: selected %q, last note read %v (Select alone leaves notifications)", st.Selected, st.Notifications[len(st.Notifications)-1].Read)
+	}
+	if err := d.Seen(ws); err != nil {
+		t.Fatal(err)
+	}
+	if st := fake.State(); !st.Notifications[len(st.Notifications)-1].Read {
+		t.Error("after Seen the notification is read")
 	}
 	if d.AttachHint() != "cmux" || d.Inside() || d.Session() != "" || d.Describe(ws) != "pr-42-fix" {
 		t.Error("outside cmux: AttachHint, Inside, Session or Describe")

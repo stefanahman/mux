@@ -368,6 +368,8 @@ func (h Herdr) Select(ws Workspace) error {
 
 func (Herdr) Focus() error { return nil }
 
+func (Herdr) Seen(Workspace) error { return nil }
+
 func (h Herdr) Close(ws Workspace) error {
 	_, err := h.call("workspace.close", map[string]any{"workspace_id": ws.ID})
 	return err

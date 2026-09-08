@@ -11,13 +11,45 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 // Cmux drives the cmux application through its CLI. Handles are
 // cmux's UUIDs, which survive reordering; refs like workspace:2 do not.
-type Cmux struct{}
+//
+// Every read comes from a snapshot — the workspace list, the whole
+// tree of panes and surfaces, the whole process table — taken with
+// three cmux commands and kept until the driver changes something.
+// NewCmux keeps the snapshot across calls; the zero value takes a
+// fresh one for every call, right but slow.
+type Cmux struct{ cache *cmuxSnapshot }
+
+// NewCmux returns a driver that reads cmux once per run.
+func NewCmux() Cmux { return Cmux{cache: &cmuxSnapshot{}} }
+
+// cmuxSnapshot is what the driver has read of cmux so far.
+type cmuxSnapshot struct {
+	list *cmuxList
+	tree *cmuxTree
+	ps   *psTable
+}
+
+// snapshot is where reads go: the kept one, or a throwaway.
+func (c Cmux) snapshot() *cmuxSnapshot {
+	if c.cache != nil {
+		return c.cache
+	}
+	return &cmuxSnapshot{}
+}
+
+// changed forgets the snapshot: the next read sees what cmux does.
+func (c Cmux) changed() {
+	if c.cache != nil {
+		*c.cache = cmuxSnapshot{}
+	}
+}
 
 // run runs one cmux command and returns trimmed stdout. CMUX_QUIET
 // silences the notices cmux prints for its older verb names.
@@ -91,9 +123,76 @@ type cmuxList struct {
 }
 
 func (c Cmux) list() (cmuxList, error) {
-	var r cmuxList
-	err := c.runJSON(&r, "workspace", "list")
-	return r, err
+	snap := c.snapshot()
+	if snap.list == nil {
+		var r cmuxList
+		if err := c.runJSON(&r, "workspace", "list"); err != nil {
+			return cmuxList{}, err
+		}
+		snap.list = &r
+	}
+	return *snap.list, nil
+}
+
+// cmuxTree is `tree --all`: every window's workspaces, their panes,
+// their surfaces — the layout of everything in one answer.
+type cmuxTree struct {
+	Windows []struct {
+		Workspaces []struct {
+			ID    string     `json:"id"`
+			Ref   string     `json:"ref"`
+			Panes []cmuxPane `json:"panes"`
+		} `json:"workspaces"`
+	} `json:"windows"`
+}
+
+func (c Cmux) tree() (*cmuxTree, error) {
+	snap := c.snapshot()
+	if snap.tree == nil {
+		var t cmuxTree
+		if err := c.runJSON(&t, "tree", "--all"); err != nil {
+			return nil, err
+		}
+		snap.tree = &t
+	}
+	return snap.tree, nil
+}
+
+// psTable is `ps -axo tty=,stat=,comm=`: every process with its tty,
+// state and command, read once. A `+` in the state marks a foreground
+// process — what a keystroke would reach.
+type psTable struct {
+	rows [][3]string
+}
+
+func (c Cmux) ps() (*psTable, error) {
+	snap := c.snapshot()
+	if snap.ps == nil {
+		out, err := runOut(exec.Command("ps", "-axo", "tty=,stat=,comm="))
+		if err != nil {
+			return nil, err
+		}
+		t := &psTable{}
+		for _, line := range strings.Split(out, "\n") {
+			if f := strings.Fields(line); len(f) >= 3 {
+				t.rows = append(t.rows, [3]string{f[0], f[1], strings.Join(f[2:], " ")})
+			}
+		}
+		snap.ps = t
+	}
+	return snap.ps, nil
+}
+
+// foreground names the processes in the foreground on a tty, by
+// their command's base name.
+func (t *psTable) foreground(tty string) []string {
+	var names []string
+	for _, r := range t.rows {
+		if r[0] == tty && strings.Contains(r[1], "+") {
+			names = append(names, filepath.Base(r[2]))
+		}
+	}
+	return names
 }
 
 func (c Cmux) Workspaces() ([]Workspace, error) {
@@ -117,6 +216,7 @@ func (c Cmux) Create(name, cwd string) (Workspace, error) {
 	if err != nil {
 		return Workspace{}, err
 	}
+	c.changed()
 	ref := cmuxRef.FindString(out)
 	if ref == "" {
 		return Workspace{}, fmt.Errorf("cmux workspace create: no workspace in the answer %q", out)
@@ -134,22 +234,59 @@ func (c Cmux) Create(name, cwd string) (Workspace, error) {
 }
 
 type cmuxPane struct {
-	Ref         string   `json:"ref"`
-	SurfaceIDs  []string `json:"surface_ids"`
-	SurfaceRefs []string `json:"surface_refs"`
+	Ref         string        `json:"ref"`
+	SurfaceIDs  []string      `json:"surface_ids"`
+	SurfaceRefs []string      `json:"surface_refs"`
+	Surfaces    []cmuxSurface `json:"surfaces"`
+}
+
+// cmuxSurface is a terminal surface as the tree reports it. cmux
+// knows the tty of the surface a workspace was created with; a tab or
+// split made through its API has none, and its title is what cmux's
+// shell integration last reported: the running program, or the
+// directory at a prompt.
+type cmuxSurface struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	TTY   string `json:"tty"`
+}
+
+// atPrompt reads a title as a shell at its prompt: a directory, or the
+// name a surface has before its first prompt.
+func (s cmuxSurface) atPrompt() bool {
+	t := s.Title
+	return t == "" || t == "Terminal" || t == "~" || strings.HasPrefix(t, "~/") || strings.HasPrefix(t, "/") || strings.HasPrefix(t, "…/")
+}
+
+// programs names what the title says runs there: its words, each by
+// base name, so `cd /x && nvim` names nvim among them.
+func (s cmuxSurface) programs() []string {
+	if s.atPrompt() {
+		return nil
+	}
+	var names []string
+	for _, w := range strings.Fields(s.Title) {
+		names = append(names, filepath.Base(w))
+	}
+	return names
 }
 
 func (c Cmux) panes(ws Workspace) ([]cmuxPane, error) {
-	var r struct {
-		Panes []cmuxPane `json:"panes"`
-	}
-	if err := c.runJSON(&r, "list-panes", "--workspace", ws.ID); err != nil {
+	t, err := c.tree()
+	if err != nil {
 		return nil, err
 	}
-	if len(r.Panes) == 0 {
-		return nil, fmt.Errorf("cmux: workspace %q has no pane", ws.Name)
+	for _, w := range t.Windows {
+		for _, x := range w.Workspaces {
+			if x.ID == ws.ID || x.Ref == ws.ID {
+				if len(x.Panes) == 0 {
+					return nil, fmt.Errorf("cmux: workspace %q has no pane", ws.Name)
+				}
+				return x.Panes, nil
+			}
+		}
 	}
-	return r.Panes, nil
+	return nil, fmt.Errorf("cmux: no workspace %q", ws.Name)
 }
 
 // Panes are the workspace's terminal surfaces, pane by pane, each
@@ -178,19 +315,10 @@ func (c Cmux) Layout(ws Workspace) ([]Tab, error) {
 	if err != nil {
 		return nil, err
 	}
-	var titles struct {
-		Surfaces []struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-		} `json:"surfaces"`
-	}
-	if err := c.runJSON(&titles, "list-pane-surfaces", "--workspace", ws.ID, "--pane", list[0].Ref); err != nil {
-		return nil, err
-	}
 	var tabs []Tab
 	for i, id := range list[0].SurfaceIDs {
 		tab := Tab{Panes: []Pane{{ID: id}}}
-		for _, s := range titles.Surfaces {
+		for _, s := range list[0].Surfaces {
 			if s.ID == id {
 				tab.Name = s.Title
 			}
@@ -245,6 +373,7 @@ func (c Cmux) AddTab(ws Workspace, name, cwd string) (Pane, error) {
 	if err != nil {
 		return Pane{}, err
 	}
+	c.changed()
 	pane, err := c.surfaceByRef(ws, cmuxRef.FindString(out))
 	if err != nil {
 		return Pane{}, err
@@ -263,6 +392,7 @@ func (c Cmux) Split(ws Workspace, pane Pane, dir Direction, cwd string) (Pane, e
 	if err != nil {
 		return Pane{}, err
 	}
+	c.changed()
 	p, err := c.surfaceByRef(ws, cmuxRef.FindString(out))
 	if err != nil {
 		return Pane{}, err
@@ -278,53 +408,41 @@ func (c Cmux) enter(ws Workspace, pane Pane, cwd string) error {
 	return c.typeLine(pane, "cd '"+strings.ReplaceAll(cwd, "'", `'\''`)+"'")
 }
 
-// Processes are the names cmux's top attributes to the surface's pane.
-// cmux files every process of a pane under the pane's first surface,
-// whichever tab runs it, so this is as fine as it gets; an idle shell
-// may not be listed at all.
-func (c Cmux) Processes(ws Workspace, pane Pane) ([]string, error) {
+// surface finds a surface of the workspace in the tree.
+func (c Cmux) surface(ws Workspace, pane Pane) (cmuxSurface, error) {
 	list, err := c.panes(ws)
 	if err != nil {
-		return nil, err
+		return cmuxSurface{}, err
 	}
-	first := ""
 	for _, p := range list {
-		for _, id := range p.SurfaceIDs {
-			if id == pane.ID && len(p.SurfaceRefs) > 0 {
-				first = p.SurfaceRefs[0]
+		for _, s := range p.Surfaces {
+			if s.ID == pane.ID {
+				return s, nil
 			}
 		}
 	}
-	if first == "" {
-		return nil, fmt.Errorf("cmux: no surface %s in %q", pane.ID, ws.Name)
-	}
-	// The rows, tab-separated: cpu, memory, count, kind, ref, parent, name.
-	out, err := c.run("top", "--workspace", ws.ID, "--processes", "--format", "tsv")
+	return cmuxSurface{}, fmt.Errorf("cmux: no surface %s in %q", pane.ID, ws.Name)
+}
+
+// Processes names what runs in the surface: the foreground processes
+// on its tty when cmux knows the tty, else what its title says.
+func (c Cmux) Processes(ws Workspace, pane Pane) ([]string, error) {
+	s, err := c.surface(ws, pane)
 	if err != nil {
 		return nil, err
 	}
-	var names []string
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Split(line, "\t")
-		if len(f) >= 7 && f[3] == "process" && f[5] == first {
-			names = append(names, f[6])
+	if s.TTY != "" {
+		t, err := c.ps()
+		if err != nil {
+			return nil, err
 		}
+		return t.foreground(strings.TrimPrefix(s.TTY, "/dev/")), nil
 	}
-	return names, nil
+	return s.programs(), nil
 }
 
-// AtShell asks cmux what runs in the workspace: a coding agent it has
-// detected by process, or the processes of the surface's pane. The
-// shell alone, or nothing, means the agent has exited.
+// AtShell: nothing, or nothing but shells, runs in the surface.
 func (c Cmux) AtShell(ws Workspace, pane Pane) bool {
-	var top struct {
-		Agents []struct {
-			ID string `json:"id"`
-		} `json:"coding_agents"`
-	}
-	if err := c.runJSON(&top, "top", "--workspace", ws.ID, "--processes"); err != nil || len(top.Agents) > 0 {
-		return false
-	}
 	names, err := c.Processes(ws, pane)
 	if err != nil {
 		return false
@@ -361,6 +479,7 @@ func (c Cmux) typeLine(pane Pane, line string) error {
 		return err
 	}
 	_, err := c.run("send-key", "--surface", pane.ID, "enter")
+	c.changed() // what runs there is about to change
 	return err
 }
 
@@ -440,14 +559,18 @@ func (c Cmux) States() (map[string]string, error) {
 	return states, nil
 }
 
-// Select shows the workspace in its window and, the user arriving,
-// marks its notifications read: done becomes idle.
+// Select shows the workspace in its window.
 func (c Cmux) Select(ws Workspace) error {
-	if _, err := c.run("workspace", "select", "--workspace", ws.ID); err != nil {
-		return err
-	}
-	_, _ = c.run("mark-notification-read", "--workspace", ws.ID)
-	return nil
+	_, err := c.run("workspace", "select", "--workspace", ws.ID)
+	c.changed()
+	return err
+}
+
+// Seen marks the workspace's notifications read: done becomes idle.
+func (c Cmux) Seen(ws Workspace) error {
+	_, err := c.run("mark-notification-read", "--workspace", ws.ID)
+	c.changed()
+	return err
 }
 
 // Focus brings cmux's window to the front, for a process running
@@ -466,6 +589,7 @@ func (c Cmux) Focus() error {
 
 func (c Cmux) Close(ws Workspace) error {
 	_, err := c.run("workspace", "close", "--workspace", ws.ID)
+	c.changed()
 	return err
 }
 

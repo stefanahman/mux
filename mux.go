@@ -105,6 +105,10 @@ type Driver interface {
 	States() (map[string]string, error)
 	// Select shows the workspace.
 	Select(ws Workspace) error
+	// Seen tells the multiplexer the user has looked at the workspace:
+	// cmux marks its notifications read, so a done agent reads idle.
+	// A no-op elsewhere.
+	Seen(ws Workspace) error
 	// Focus brings the user's client, or the application, to the front.
 	Focus() error
 	// Close removes the workspace.
@@ -146,7 +150,7 @@ func ByKind(kind string) Driver {
 	case "herdr":
 		return NewHerdr("")
 	case "cmux":
-		return Cmux{}
+		return NewCmux()
 	}
 	return nil
 }

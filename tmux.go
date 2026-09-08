@@ -221,6 +221,8 @@ func (Tmux) Select(ws Workspace) error {
 	return err
 }
 
+func (Tmux) Seen(Workspace) error { return nil }
+
 // Focus switches the client this process belongs to over to the session.
 func (t Tmux) Focus() error {
 	_, err := tmux("switch-client", "-t", t.target(""))
