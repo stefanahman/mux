@@ -8,7 +8,6 @@ package mux
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -96,26 +95,22 @@ func (c Cmux) Ping() error {
 		return fmt.Errorf("%w (run from a cmux terminal, or start cmux with CMUX_SOCKET_MODE=allowAll)", err)
 	}
 	var id struct {
-		App string `json:"app_executable_path"`
+		Socket string `json:"socket_path"`
 	}
-	if err := c.runJSON(&id, "identify"); err != nil || id.App == "" {
-		return nil // no app path to look up; the socket answered
+	if err := c.runJSON(&id, "identify"); err != nil || id.Socket == "" {
+		return nil // the socket answered; no path to find its owner by
 	}
-	return auditApp(id.App)
+	return auditCmuxApp(id.Socket)
 }
 
-// auditApp reads the environment of the app at path, when it runs.
-func auditApp(path string) error {
-	pid := findProcess(path)
-	if pid == 0 {
-		return nil
-	}
-	env, err := processEnv(pid)
-	if err != nil {
+// auditCmuxApp reads the environment of the app holding the socket.
+func auditCmuxApp(socket string) error {
+	env, ok := ownerEnv(socket)
+	if !ok {
 		return nil
 	}
 	if len(carries(env, "TMUX")) > 0 {
-		return errors.New("cmux: the app was launched with TMUX in its environment (from a shell inside tmux): its shell integration hands CMUX_SURFACE_ID to tmux before every command and the Claude Code hooks never engage; relaunch cmux from a hotkey or Spotlight")
+		return taintError{"cmux: the app was launched with TMUX in its environment (from a shell inside tmux): its shell integration hands CMUX_SURFACE_ID to tmux before every command and the Claude Code hooks never engage; relaunch cmux from a hotkey or Spotlight"}
 	}
 	return claudeTaint("cmux: the app", env)
 }

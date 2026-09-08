@@ -95,10 +95,13 @@ app, and an app launched from a shell gets that shell's environment
 before every command, so its Claude Code hooks never engage; Claude
 Code's own session markers (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`)
 make every agent a child session that saves no transcript. `Ping`
-reads the tmux server's global environment, the herdr server's and
-the cmux app's, and fails naming the marker and the fix: relaunch from
-a hotkey or a plain shell. Launchers pass `CleanEnv(os.Environ())` to
-what they start, so a launch from any shell comes out clean.
+reads the tmux server's global environment and the environment of the
+process holding the herdr or cmux socket (`lsof` on macOS, `ss` on
+Linux), and fails naming the marker and the fix: relaunch from a
+hotkey or a plain shell (`errors.Is(err, mux.ErrTainted)` tells that
+failure from an unreachable multiplexer). Launchers pass `CleanEnv(os.Environ())` to
+what they start, so a launch from any shell comes out clean, and
+`Tmux.Prepare` starts a server without the markers itself.
 
 ## Testing against it
 

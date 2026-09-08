@@ -45,6 +45,15 @@ func tmux(args ...string) (string, error) {
 	return runOut(exec.Command("tmux", args...))
 }
 
+// tmuxClean runs tmux without Claude Code's session markers in its
+// environment: for the command that may start the server, which
+// inherits the client's environment and passes it to every pane.
+func tmuxClean(args ...string) (string, error) {
+	cmd := exec.Command("tmux", args...)
+	cmd.Env = withoutClaude(os.Environ())
+	return runOut(cmd)
+}
+
 // TmuxTarget builds an exact-match `-t` argument. Without the `=`
 // prefix tmux falls back to prefix matching, so `pr-1` would resolve
 // to `pr-12-foo` when `pr-1` itself doesn't exist.
@@ -87,7 +96,7 @@ func (t Tmux) Prepare(cwd string) error {
 	if _, err := tmux("has-session", "-t", t.target("")); err == nil {
 		return nil
 	}
-	if _, err := tmux("new-session", "-d", "-s", t.session(), "-n", t.keepalive(), "-c", cwd); err != nil {
+	if _, err := tmuxClean("new-session", "-d", "-s", t.session(), "-n", t.keepalive(), "-c", cwd); err != nil {
 		// Two children starting at once both saw no session; the
 		// loser of the race finds the winner's.
 		if _, again := tmux("has-session", "-t", t.target("")); again == nil {

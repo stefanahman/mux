@@ -97,22 +97,14 @@ func (h Herdr) Ping() error {
 	if _, err := h.call("ping", struct{}{}); err != nil {
 		return err
 	}
-	return auditHerdrServer(h.Session())
+	return auditHerdrServer(h.Socket, h.Session())
 }
 
-// auditHerdrServer reads the environment of the session's server,
-// when it runs.
-func auditHerdrServer(session string) error {
-	prefix := "herdr --session " + session + " server"
-	if session == "default" {
-		prefix = "herdr server"
-	}
-	pid := findProcess(prefix)
-	if pid == 0 {
-		return nil
-	}
-	env, err := processEnv(pid)
-	if err != nil {
+// auditHerdrServer reads the environment of the server holding the
+// session's socket.
+func auditHerdrServer(socket, session string) error {
+	env, ok := ownerEnv(socket)
+	if !ok {
 		return nil
 	}
 	return claudeTaint("herdr: the "+session+" server", env)

@@ -166,6 +166,32 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Fatalf("waited for %s", what)
 }
 
+// Prepare's server start drops the caller's Claude Code markers, so
+// a server owl or spaces starts from inside a session is clean.
+func TestTmuxPrepareStartsClean(t *testing.T) {
+	dir, err := os.MkdirTemp("", "mux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMUX_TMPDIR", dir)
+	t.Setenv("TMUX", "")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+	tm := mux.Tmux{}
+	if err := tm.Prepare(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-server").Run() })
+	out, _ := exec.Command("tmux", "show-environment", "-g").Output()
+	if strings.Contains(string(out), "CLAUDECODE") {
+		t.Errorf("the server inherited the markers:\n%s", out)
+	}
+	if err := tm.Ping(); err != nil {
+		t.Errorf("the server Prepare started: %v", err)
+	}
+}
+
 func TestHerdr(t *testing.T) {
 	fake := muxtest.NewFakeHerdr(t)
 	for _, v := range []string{"HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_SESSION"} {
