@@ -456,12 +456,14 @@ func (c Cmux) AtShell(ws Workspace, pane Pane) bool {
 }
 
 // Run types a command line into the surface's shell, with what cmux's
-// Claude Code wrapper needs in front. cmux 0.64.22 puts
-// CMUX_WORKSPACE_ID and CMUX_TAB_ID in a terminal's environment but
-// not CMUX_SURFACE_ID, the one variable the wrapper checks before
-// injecting its hooks; without them the state stays unknown. A cmux
-// that gives this process the variable gives every terminal the
-// variable, and the line is typed as it is.
+// Claude Code wrapper needs in front when this process lacks it. cmux
+// gives its terminals CMUX_SURFACE_ID, the variable the wrapper checks
+// before injecting its hooks — unless TMUX is in cmux's own
+// environment (an app launched from a shell inside tmux inherits it),
+// when cmux's shell integration takes the variable away before every
+// command to sync it into tmux instead, and the wrapper passes
+// through. A process that has the variable is in a healthy cmux, and
+// the line is typed as it is.
 func (c Cmux) Run(_ Workspace, pane Pane, line string) error {
 	if os.Getenv("CMUX_SURFACE_ID") == "" {
 		line = "CMUX_SURFACE_ID=" + pane.ID + " " + line

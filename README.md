@@ -72,10 +72,12 @@ cmux unless cmux was launched with `CMUX_SOCKET_MODE=allowAll`;
 `Ping` says so. Handles are UUIDs — refs like `workspace:2` renumber.
 The hooks are cmux's Claude Code integration, on through
 `automation.claudeCodeIntegration: true` in `~/.config/cmux/cmux.json`.
-Its terminals carry `CMUX_WORKSPACE_ID` and `CMUX_TAB_ID` but not the
-`CMUX_SURFACE_ID` its Claude Code wrapper checks before injecting the
-hooks, so `Run` types `CMUX_SURFACE_ID=<id> …` when this process lacks
-the variable; a cmux that sets it gets the line as it is. Hook records
+Its terminals carry `CMUX_SURFACE_ID`, which its Claude Code wrapper
+checks before injecting the hooks — unless `TMUX` is in cmux's own
+environment (an app launched from a shell inside tmux inherits it),
+when its shell integration unsets the variable before every command
+and the wrapper passes through; `Run` types `CMUX_SURFACE_ID=<id> …`
+when this process lacks the variable, which covers that case. Hook records
 come from `cmux sessions --agent claude`: `running`, `needsInput`,
 `idle`, kept after the agent exits (`stored_pid_exists` tells). `done`
 is idle with cmux's notification about the turn unread; `Seen` marks
