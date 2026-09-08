@@ -73,11 +73,7 @@ cmux unless cmux was launched with `CMUX_SOCKET_MODE=allowAll`;
 The hooks are cmux's Claude Code integration, on through
 `automation.claudeCodeIntegration: true` in `~/.config/cmux/cmux.json`.
 Its terminals carry `CMUX_SURFACE_ID`, which its Claude Code wrapper
-checks before injecting the hooks — unless `TMUX` is in cmux's own
-environment (an app launched from a shell inside tmux inherits it),
-when its shell integration unsets the variable before every command
-and the wrapper passes through; `Run` types `CMUX_SURFACE_ID=<id> …`
-when this process lacks the variable, which covers that case. Hook records
+checks before injecting the hooks. Hook records
 come from `cmux sessions --agent claude`: `running`, `needsInput`,
 `idle`, kept after the agent exits (`stored_pid_exists` tells). `done`
 is idle with cmux's notification about the turn unread; `Seen` marks
@@ -89,6 +85,20 @@ cmux's shell integration keeps: the running program's line, or the
 directory at a prompt (`Terminal` before the first one). Reads come
 from one snapshot per driver (`NewCmux`): the list, the tree and `ps`,
 taken once and dropped when the driver changes something.
+
+## A tainted server or app
+
+A multiplexer's terminals inherit the environment of its server or
+app, and an app launched from a shell gets that shell's environment
+(macOS's `open` hands it over). Two things in it break agents quietly:
+`TMUX` makes cmux's shell integration hand `CMUX_SURFACE_ID` to tmux
+before every command, so its Claude Code hooks never engage; Claude
+Code's own session markers (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`)
+make every agent a child session that saves no transcript. `Ping`
+reads the tmux server's global environment, the herdr server's and
+the cmux app's, and fails naming the marker and the fix: relaunch from
+a hotkey or a plain shell. Launchers pass `CleanEnv(os.Environ())` to
+what they start, so a launch from any shell comes out clean.
 
 ## Testing against it
 

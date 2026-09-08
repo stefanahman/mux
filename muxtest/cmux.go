@@ -166,6 +166,8 @@ func FakeCmuxMain(args []string) int {
 	switch {
 	case verb == "ping":
 		fmt.Println("PONG")
+	case verb == "identify":
+		return out(map[string]any{"app_executable_path": "/nonexistent/fake-cmux.app/Contents/MacOS/cmux", "socket_path": "/tmp/fake-cmux.sock"})
 	case verb == "tree" && opts["--all"] == "true":
 		type surface struct {
 			ID    string `json:"id"`

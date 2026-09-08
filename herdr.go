@@ -90,9 +90,32 @@ func (Herdr) Inside() bool { return os.Getenv("HERDR_ENV") == "1" }
 
 func (h Herdr) ChildEnv() []string { return []string{"HERDR_SOCKET_PATH=" + h.Socket} }
 
+// Ping asks the server, then reads its environment: a server started
+// from inside a Claude Code session makes every agent in its panes a
+// child session.
 func (h Herdr) Ping() error {
-	_, err := h.call("ping", struct{}{})
-	return err
+	if _, err := h.call("ping", struct{}{}); err != nil {
+		return err
+	}
+	return auditHerdrServer(h.Session())
+}
+
+// auditHerdrServer reads the environment of the session's server,
+// when it runs.
+func auditHerdrServer(session string) error {
+	prefix := "herdr --session " + session + " server"
+	if session == "default" {
+		prefix = "herdr server"
+	}
+	pid := findProcess(prefix)
+	if pid == 0 {
+		return nil
+	}
+	env, err := processEnv(pid)
+	if err != nil {
+		return nil
+	}
+	return claudeTaint("herdr: the "+session+" server", env)
 }
 
 // Prepare has nothing to create — herdr has no container above its

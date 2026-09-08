@@ -118,6 +118,23 @@ func TestTmux(t *testing.T) {
 	if err := d.Select(ws); err != nil {
 		t.Fatal(err)
 	}
+	// A server started from inside a Claude Code session carries its
+	// markers in the global environment; Ping and Prepare say so.
+	if _, err := exec.Command("tmux", "set-environment", "-g", "CLAUDECODE", "1").Output(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Ping(); err == nil || !strings.Contains(err.Error(), "child sessions") || !strings.Contains(err.Error(), "CLAUDECODE") {
+		t.Errorf("Ping with a tainted server: %v", err)
+	}
+	if err := d.Prepare(root); err == nil {
+		t.Error("Prepare should refuse a tainted server")
+	}
+	if _, err := exec.Command("tmux", "set-environment", "-gu", "CLAUDECODE").Output(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Ping(); err != nil {
+		t.Errorf("Ping after the marker is gone: %v", err)
+	}
 	if got := d.Describe(ws); got != "reviews:pr-1-fix" {
 		t.Errorf("Describe = %q", got)
 	}
@@ -300,8 +317,8 @@ func TestCmux(t *testing.T) {
 	if ws.ID != "WS-2" || ws.Name != "pr-42-fix" || ws.Cwd != "/repo/wt" {
 		t.Errorf("created %+v", ws)
 	}
-	if got := fake.Calls()[1]; got != "workspace create --name pr-42-fix --cwd /repo/wt --focus false" {
-		t.Errorf("create call %q", got)
+	if !contains(fake.Calls(), "workspace create --name pr-42-fix --cwd /repo/wt --focus false") {
+		t.Errorf("create call missing from %v", fake.Calls())
 	}
 	if list, _ := d.Workspaces(); len(list) != 2 || list[0].Name != "~" || list[1] != ws {
 		t.Errorf("Workspaces() = %+v", list)
@@ -311,25 +328,16 @@ func TestCmux(t *testing.T) {
 	if err != nil || pane.ID != fw.Panes[0].Surfaces[0].ID {
 		t.Fatalf("AgentPane = %v, %v; want the surface the workspace was created with", pane, err)
 	}
-	// cmux 0.64.22 gives no CMUX_SURFACE_ID: the line carries it for
-	// the wrapper. A prompt to the agent never does.
+	// A shell line and a prompt are both typed as they are.
 	if err := d.Run(ws, pane, "claude x"); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Prompt(ws, pane, "look"); err != nil {
 		t.Fatal(err)
 	}
-	if got := fake.Typed(pane.ID); !reflect.DeepEqual(got, []string{"CMUX_SURFACE_ID=" + pane.ID + " claude x", "<enter>", "look", "<enter>"}) {
+	if got := fake.Typed(pane.ID); !reflect.DeepEqual(got, []string{"claude x", "<enter>", "look", "<enter>"}) {
 		t.Errorf("typed %v", got)
 	}
-	t.Setenv("CMUX_SURFACE_ID", "given")
-	if err := d.Run(ws, pane, "claude -c"); err != nil {
-		t.Fatal(err)
-	}
-	if got := fake.Typed(pane.ID); got[len(got)-2] != "claude -c" {
-		t.Errorf("typed %v, want the bare line last", got)
-	}
-	t.Setenv("CMUX_SURFACE_ID", "")
 
 	tab, err := d.AddTab(ws, "nvim", "/repo/branches")
 	if err != nil {

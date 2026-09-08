@@ -2,6 +2,7 @@ package muxtest
 
 import (
 	"fmt"
+	"github.com/stefanahman/mux"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,7 +37,12 @@ func StartTmux(t *testing.T) {
 	// detected, and get the test's workspaces.
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("CMUX_WORKSPACE_ID", "")
-	if out, err := exec.Command("tmux", "-L", "default", "-f", conf, "start-server").CombinedOutput(); err != nil {
+	// The server's global environment is what every window inherits:
+	// start it without the markers a developer's shell may carry, as a
+	// launch from a hotkey would.
+	start := exec.Command("tmux", "-L", "default", "-f", conf, "start-server")
+	start.Env = mux.CleanEnv(os.Environ())
+	if out, err := start.CombinedOutput(); err != nil {
 		t.Fatalf("tmux start-server: %v\n%s", err, out)
 	}
 	socket := filepath.Join(sockDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default")

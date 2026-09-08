@@ -63,16 +63,27 @@ func (Tmux) Inside() bool { return os.Getenv("TMUX") != "" }
 
 func (Tmux) ChildEnv() []string { return nil }
 
+// Ping checks tmux is there and, when a server runs, that its global
+// environment carries no Claude Code session markers: every new
+// window inherits it, and a server started from inside a Claude Code
+// session makes every agent a child session.
 func (Tmux) Ping() error {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return errors.New("tmux: not on PATH")
 	}
-	return nil
+	out, err := tmux("show-environment", "-g")
+	if err != nil {
+		return nil // no server yet: nothing inherited
+	}
+	return claudeTaint("tmux: the server", strings.Split(out, "\n"))
 }
 
 // Prepare creates the session with its keepalive window when it
 // doesn't exist.
 func (t Tmux) Prepare(cwd string) error {
+	if err := t.Ping(); err != nil {
+		return err
+	}
 	if _, err := tmux("has-session", "-t", t.target("")); err == nil {
 		return nil
 	}

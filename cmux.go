@@ -8,6 +8,7 @@ package mux
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -81,7 +82,12 @@ func (Cmux) Inside() bool { return os.Getenv("CMUX_WORKSPACE_ID") != "" }
 func (Cmux) ChildEnv() []string { return nil }
 
 // Ping asks cmux; its socket admits only processes started inside
-// cmux unless cmux was launched with CMUX_SOCKET_MODE=allowAll.
+// cmux unless cmux was launched with CMUX_SOCKET_MODE=allowAll. It
+// then reads the app's environment: TMUX in it makes cmux's shell
+// integration hand CMUX_SURFACE_ID to tmux before every command, so
+// the Claude Code hooks never engage, and Claude Code's session markers
+// make every agent a child session — both come from an app launched
+// out of a shell, and both are fixed by relaunching it from a hotkey.
 func (c Cmux) Ping() error {
 	if _, err := c.run("ping"); err != nil {
 		if c.Inside() {
@@ -89,7 +95,29 @@ func (c Cmux) Ping() error {
 		}
 		return fmt.Errorf("%w (run from a cmux terminal, or start cmux with CMUX_SOCKET_MODE=allowAll)", err)
 	}
-	return nil
+	var id struct {
+		App string `json:"app_executable_path"`
+	}
+	if err := c.runJSON(&id, "identify"); err != nil || id.App == "" {
+		return nil // no app path to look up; the socket answered
+	}
+	return auditApp(id.App)
+}
+
+// auditApp reads the environment of the app at path, when it runs.
+func auditApp(path string) error {
+	pid := findProcess(path)
+	if pid == 0 {
+		return nil
+	}
+	env, err := processEnv(pid)
+	if err != nil {
+		return nil
+	}
+	if len(carries(env, "TMUX")) > 0 {
+		return errors.New("cmux: the app was launched with TMUX in its environment (from a shell inside tmux): its shell integration hands CMUX_SURFACE_ID to tmux before every command and the Claude Code hooks never engage; relaunch cmux from a hotkey or Spotlight")
+	}
+	return claudeTaint("cmux: the app", env)
 }
 
 func (c Cmux) Prepare(string) error { return c.Ping() }
@@ -455,21 +483,10 @@ func (c Cmux) AtShell(ws Workspace, pane Pane) bool {
 	return true
 }
 
-// Run types a command line into the surface's shell, with what cmux's
-// Claude Code wrapper needs in front when this process lacks it. cmux
-// gives its terminals CMUX_SURFACE_ID, the variable the wrapper checks
-// before injecting its hooks — unless TMUX is in cmux's own
-// environment (an app launched from a shell inside tmux inherits it),
-// when cmux's shell integration takes the variable away before every
-// command to sync it into tmux instead, and the wrapper passes
-// through. A process that has the variable is in a healthy cmux, and
-// the line is typed as it is.
-func (c Cmux) Run(_ Workspace, pane Pane, line string) error {
-	if os.Getenv("CMUX_SURFACE_ID") == "" {
-		line = "CMUX_SURFACE_ID=" + pane.ID + " " + line
-	}
-	return c.typeLine(pane, line)
-}
+// Run types a command line into the surface's shell. cmux gives its
+// terminals the CMUX_SURFACE_ID its Claude Code wrapper needs; a cmux
+// where it is missing is broken, and Ping says so.
+func (c Cmux) Run(_ Workspace, pane Pane, line string) error { return c.typeLine(pane, line) }
 
 // Prompt types the text to the agent, as tmux would: cmux has no
 // prompt call of its own for a terminal agent.
