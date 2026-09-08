@@ -31,6 +31,11 @@ func StartTmux(t *testing.T) {
 	t.Setenv("TMUX_TMPDIR", sockDir)
 	t.Setenv("TMUX", "")
 	t.Setenv("HISTFILE", "")
+	// The test's multiplexer is this server, whatever the test itself
+	// runs in: a herdr pane or a cmux terminal would otherwise be
+	// detected, and get the test's workspaces.
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("CMUX_WORKSPACE_ID", "")
 	if out, err := exec.Command("tmux", "-L", "default", "-f", conf, "start-server").CombinedOutput(); err != nil {
 		t.Fatalf("tmux start-server: %v\n%s", err, out)
 	}
