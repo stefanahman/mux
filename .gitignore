@@ -1,0 +1,5 @@
+# Go build and test leftovers. mux is a library — it has no binary of
+# its own, and no goreleaser, so this is only what the toolchain drops.
+*.test
+*.out
+coverage.*
