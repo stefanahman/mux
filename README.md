@@ -56,6 +56,16 @@ colour and SF Symbol are applied on creation and are best effort: a
 style the multiplexer refuses leaves the workspace grouped and returns
 no error.
 
+Anchoring costs a step. cmux 0.64.22 answers `workspace-group create
+--from <ws>` with a group of two — a workspace it generates to carry
+the header, plus the one it was given — so the driver moves the anchor
+onto the caller's workspace and closes the generated one. Left alone,
+every group would put a phantom row in the sidebar and outlive its
+real members. That close only fires on the shape a fresh create leaves,
+a group of exactly the caller's workspace and one other; anything else
+keeps its generated anchor, because an untidy sidebar is recoverable
+and a closed workspace is not.
+
 `States` speaks four words: `working`, `blocked` (a permission or a
 question waits), `done` (finished, not yet looked at), `idle`; `""` is
 unknown. Under tmux and cmux the state is Claude Code's, from its

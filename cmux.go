@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -600,6 +601,7 @@ func parsePill(out, key string) (string, bool) {
 type cmuxGroup struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
+	AnchorID  string   `json:"anchor_workspace_id"`
 	MemberIDs []string `json:"member_workspace_ids"`
 }
 
@@ -620,11 +622,16 @@ func (c Cmux) groups() ([]cmuxGroup, error) {
 	return r.Groups, nil
 }
 
-// Group puts the workspace in the named group, creating it anchored
-// on that workspace the first time. `create --from` is what anchors it
-// on a workspace that already exists; `create` without it makes an
-// empty anchor workspace of its own, which would put a phantom row in
-// the sidebar for every group.
+// Group puts the workspace in the named group, creating that group
+// around it the first time.
+//
+// cmux 0.64.22 makes an anchor of its own whatever `create --from`
+// says: a workspace titled after the group, in the home directory,
+// listed first among the members. Left alone it would put a phantom
+// row in the sidebar for every group, and hold the group open after
+// the last real member closed. So a create is followed by moving the
+// anchor onto the caller's workspace and closing the one cmux made
+// (see adoptAnchor).
 //
 // The group is looked up by name, which is what the CLI offers:
 // `workspace-group list` prints no stable key of our own (the record
@@ -662,8 +669,51 @@ func (c Cmux) Group(name string, ws Workspace, style GroupStyle) error {
 		return err
 	}
 	c.changed()
+	c.adoptAnchor(name, ws)
 	c.style(name, style)
 	return nil
+}
+
+// adoptAnchor makes ws the anchor of the group just created for it and
+// closes the anchor cmux generated, so the sidebar shows the group on
+// the caller's own workspace and loses the group when that workspace
+// closes.
+//
+// Closing a workspace cannot be undone, so this only fires on the one
+// shape a fresh create leaves behind: a group of exactly two, the
+// caller's workspace and an anchor that is not it. Anything else — a
+// third member, an anchor that is already ours, a group that cannot be
+// found — is left as it is. An untidy sidebar is a smaller price than
+// closing something of the user's.
+//
+// The generated anchor is inferred from that shape. cmux's rpc records
+// carry `anchor_workspace_is_generated`, which would say it outright,
+// but 0.64.22's `workspace-group list` does not print it. When a later
+// cmux does, read the flag instead of counting members.
+func (c Cmux) adoptAnchor(name string, ws Workspace) {
+	gs, err := c.groups()
+	if err != nil {
+		return
+	}
+	for _, g := range gs {
+		if g.Name != name {
+			continue
+		}
+		if len(g.MemberIDs) != 2 || g.AnchorID == ws.ID || g.AnchorID == "" {
+			return
+		}
+		if !slices.Contains(g.MemberIDs, ws.ID) || !slices.Contains(g.MemberIDs, g.AnchorID) {
+			return
+		}
+		generated := g.AnchorID
+		if _, err := c.run("workspace-group", "set-anchor", "--group", g.ID, "--workspace", ws.ID); err != nil {
+			return // the group stands; its header is just cmux's row
+		}
+		c.changed()
+		_, _ = c.run("workspace", "close", "--workspace", generated)
+		c.changed()
+		return
+	}
 }
 
 // style paints a group the caller named, quietly: the answer to

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,18 +19,20 @@ const FakeCmuxEnv = "MUXTEST_FAKE_CMUX"
 // invocations: the shapes the driver reads, as cmux 0.64.22 prints
 // them, and what it was asked.
 type FakeCmuxState struct {
-	Next          int
-	Workspaces    []FakeCmuxWorkspace
-	Sessions      []FakeCmuxSession
-	Notifications []FakeCmuxNote
-	Statuses      map[string][]FakeCmuxStatus // workspace id → sidebar status pills
-	Groups        []FakeCmuxGroup             // sidebar workspace groups
-	PS            FakePS                      // tty → foreground commands
-	Typed         map[string][]string         // surface id → text and keys, in order
-	Calls         []string
-	Rejects       []string // verbs the fake fails, for the caller's error paths
-	Selected      string   // workspace id
-	Focused       string   // window ref
+	Next            int
+	Workspaces      []FakeCmuxWorkspace
+	Sessions        []FakeCmuxSession
+	Notifications   []FakeCmuxNote
+	Statuses        map[string][]FakeCmuxStatus // workspace id → sidebar status pills
+	Groups          []FakeCmuxGroup             // sidebar workspace groups
+	PS              FakePS                      // tty → foreground commands
+	Typed           map[string][]string         // surface id → text and keys, in order
+	Calls           []string
+	Rejects         []string // verbs the fake fails, for the caller's error paths
+	AnchorsOnGiven  bool     // create anchors on the workspace it was given, generating none
+	CaptureOnCreate []string // workspace ids create also pulls into the group
+	Selected        string   // workspace id
+	Focused         string   // window ref
 }
 
 // FakeCmuxWorkspace mirrors a `workspace list` record.
@@ -286,6 +289,32 @@ func FakeCmuxMain(args []string) int {
 			fmt.Println("OK " + w.Ref)
 		case "workspace close":
 			st.Workspaces = append(st.Workspaces[:i], st.Workspaces[i+1:]...)
+			// A closing workspace leaves its group; the anchor's row is
+			// the group's header, so cmux promotes the next member, and
+			// the last member out takes the group with it.
+			var groups []FakeCmuxGroup
+			for _, g := range st.Groups {
+				var kept []string
+				for _, m := range g.MemberIDs {
+					if m != w.ID {
+						kept = append(kept, m)
+					}
+				}
+				if len(kept) == 0 {
+					continue
+				}
+				g.MemberIDs = kept
+				if g.AnchorID == w.ID {
+					g.AnchorID = kept[0]
+					for _, x := range st.Workspaces {
+						if x.ID == kept[0] {
+							g.AnchorRef = x.Ref
+						}
+					}
+				}
+				groups = append(groups, g)
+			}
+			st.Groups = groups
 			fmt.Println("OK " + w.Ref)
 		case "mark-notification-read":
 			for j := range st.Notifications {
@@ -386,31 +415,83 @@ func FakeCmuxMain(args []string) int {
 	case verb == "workspace-group list":
 		return out(map[string]any{"window_ref": "window:1", "window_id": "WIN-1", "groups": st.Groups})
 	case verb == "workspace-group create":
-		// --from takes the workspaces to capture, the first of them the
-		// anchor. Without it cmux makes an anchor-only group with a
-		// workspace of its own; the driver never asks for that, so the
-		// fake does not answer it.
-		from := strings.Split(opts["--from"], ",")
+		// --from names the workspaces to capture, and cmux 0.64.22 makes
+		// an anchor of its own regardless: a workspace titled after the
+		// group, in $HOME, listed first among the members. Verified live
+		// — `create --name X --from <ws>` answers with a group of two.
+		// Whoever reads this after a cmux that anchors on the workspace
+		// it was given can delete the generated one here and in the
+		// driver together.
 		if opts["--from"] == "" {
 			return fail("workspace-group create: --from is required here")
 		}
+		from := strings.Split(opts["--from"], ",")
 		for _, id := range from {
 			if _, ok := find(id); !ok {
 				return fail("no such workspace " + id)
 			}
 		}
+		if rejected("create") {
+			return fail("create: rejected")
+		}
 		st.Next++
-		anchor, _ := find(from[0])
+		var members []string
+		anchorID, anchorRef := "", ""
+		if !st.AnchorsOnGiven {
+			anchor := FakeCmuxWorkspace{
+				ID:          fmt.Sprintf("WS-ANCHOR-%d", st.Next),
+				Ref:         fmt.Sprintf("workspace:%d", st.Next),
+				Title:       opts["--name"],
+				CustomTitle: opts["--name"],
+				HasCustom:   opts["--name"] != "",
+				Cwd:         os.Getenv("HOME"),
+			}
+			st.Workspaces = append(st.Workspaces, anchor)
+			members = append(members, anchor.ID)
+			anchorID, anchorRef = anchor.ID, anchor.Ref
+		}
+		for _, id := range append(from, st.CaptureOnCreate...) {
+			i, ok := find(id)
+			if !ok {
+				continue
+			}
+			w := st.Workspaces[i]
+			if slices.Contains(members, w.ID) {
+				continue
+			}
+			members = append(members, w.ID)
+			if anchorID == "" {
+				anchorID, anchorRef = w.ID, w.Ref
+			}
+		}
 		g := FakeCmuxGroup{
 			ID:        fmt.Sprintf("GRP-%d", st.Next),
 			Ref:       fmt.Sprintf("workspace_group:%d", st.Next),
 			Name:      opts["--name"],
-			AnchorID:  st.Workspaces[anchor].ID,
-			AnchorRef: st.Workspaces[anchor].Ref,
-			MemberIDs: from,
+			AnchorID:  anchorID,
+			AnchorRef: anchorRef,
+			MemberIDs: members,
 		}
 		st.Groups = append(st.Groups, g)
 		fmt.Println("OK " + g.Ref)
+	case verb == "workspace-group set-anchor":
+		if rejected("set-anchor") {
+			return fail("set-anchor: rejected")
+		}
+		gi, ok := group(opts["--group"])
+		if !ok {
+			return fail("no such group " + opts["--group"])
+		}
+		wi, ok := find(opts["--workspace"])
+		if !ok {
+			return fail("no such workspace " + opts["--workspace"])
+		}
+		w := st.Workspaces[wi]
+		if !slices.Contains(st.Groups[gi].MemberIDs, w.ID) {
+			return fail("workspace is not in the group")
+		}
+		st.Groups[gi].AnchorID, st.Groups[gi].AnchorRef = w.ID, w.Ref
+		fmt.Println("OK")
 	case verb == "workspace-group add":
 		if rejected("add") {
 			return fail("add: rejected")
@@ -600,6 +681,21 @@ func (f *FakeCmux) Group(name string) (FakeCmuxGroup, bool) {
 		}
 	}
 	return FakeCmuxGroup{}, false
+}
+
+// AnchorsOnGiven makes create anchor the group on the workspace it was
+// given and generate none — a cmux later than 0.64.22, or one asked
+// through a path that does not synthesise a header row.
+func (f *FakeCmux) AnchorsOnGiven() {
+	f.Edit(func(st *FakeCmuxState) { st.AnchorsOnGiven = true })
+}
+
+// CaptureOnCreate makes create pull these workspaces into the group
+// besides the one it was given, the way capturing an ambient selection
+// would. A group that comes back holding more than the caller's
+// workspace and the generated anchor is one nothing may close.
+func (f *FakeCmux) CaptureOnCreate(workspaceIDs ...string) {
+	f.Edit(func(st *FakeCmuxState) { st.CaptureOnCreate = append(st.CaptureOnCreate, workspaceIDs...) })
 }
 
 // Reject makes the fake fail those verbs — the second word of a

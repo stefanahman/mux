@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -736,4 +737,139 @@ func countCalls(calls []string, verb string) int {
 		}
 	}
 	return n
+}
+
+// TestCmuxGroupAdoptsTheAnchor: cmux 0.64.22 answers a create with a
+// group of two — a workspace it generated to carry the header, and the
+// one the caller named. The driver moves the anchor onto the caller's
+// workspace and closes the generated one, so the sidebar shows the
+// group on a workspace that means something and loses it when that
+// workspace closes.
+func TestCmuxGroupAdoptsTheAnchor(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	before := len(fake.State().Workspaces)
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	g, ok := fake.Group("reviews")
+	if !ok || g.AnchorID != "W1" || !reflect.DeepEqual(g.MemberIDs, []string{"W1"}) {
+		t.Fatalf("group = %+v, %v; want anchored on W1 holding only it", g, ok)
+	}
+	if n := len(fake.State().Workspaces); n != before {
+		t.Errorf("%d workspaces, want the %d there were: the generated anchor outlived the call", n, before)
+	}
+	if countCalls(fake.Calls(), "workspace-group set-anchor") != 1 || countCalls(fake.Calls(), "workspace close") != 1 {
+		t.Errorf("adopting the anchor took: %v", fake.Calls())
+	}
+
+	// Closing the workspace takes the group with it — the reason for
+	// all of the above.
+	if err := d.Close(mux.Workspace{ID: "W1", Name: "pr-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fake.Group("reviews"); ok {
+		t.Error("the group outlived its last member")
+	}
+}
+
+// TestCmuxGroupLeavesAThirdWorkspaceAlone: closing a workspace cannot
+// be undone, so the anchor is only adopted from the shape a fresh
+// create leaves — the caller's workspace and one other. A group that
+// comes back holding anything else keeps its generated anchor, and the
+// call still succeeds.
+func TestCmuxGroupLeavesAThirdWorkspaceAlone(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.AddWorkspace("mine", "W9")
+	fake.CaptureOnCreate("W9")
+	before := len(fake.State().Workspaces)
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := fake.Group("reviews")
+	if len(g.MemberIDs) != 3 || g.AnchorID == "W1" {
+		t.Fatalf("group = %+v; want the three it came back with, anchor untouched", g)
+	}
+	if n := countCalls(fake.Calls(), "workspace close"); n != 0 {
+		t.Errorf("closed something with a third workspace in the group: %v", fake.Calls())
+	}
+	// The generated anchor stays: untidy, and the price of not guessing.
+	if n := len(fake.State().Workspaces); n != before+1 {
+		t.Errorf("%d workspaces, want %d — the generated anchor and no more", n, before+1)
+	}
+	if _, ok := fake.Workspace("mine"); !ok {
+		t.Error("the user's workspace was closed")
+	}
+}
+
+// TestCmuxGroupKeepsTheAnchorWhenSetAnchorFails: the workspace is in
+// the group either way, which is what the caller asked for, so a
+// refused set-anchor leaves the generated header standing and reports
+// nothing. Nothing is closed on that path — the group would lose its
+// anchor.
+func TestCmuxGroupKeepsTheAnchorWhenSetAnchorFails(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.Reject("set-anchor")
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, mux.GroupStyle{}); err != nil {
+		t.Fatalf("a refused set-anchor failed the call: %v", err)
+	}
+	g, ok := fake.Group("reviews")
+	if !ok || !slices.Contains(g.MemberIDs, "W1") {
+		t.Fatalf("group = %+v, %v; want W1 in it", g, ok)
+	}
+	if g.AnchorID == "W1" {
+		t.Error("the anchor moved after set-anchor was refused")
+	}
+	if n := countCalls(fake.Calls(), "workspace close"); n != 0 {
+		t.Errorf("closed the anchor the group still needs: %v", fake.Calls())
+	}
+}
+
+// TestCmuxGroupAdoptsNothingWhenCmuxAnchorsOnGiven: a cmux that
+// anchors the group on the workspace it was given leaves nothing to
+// adopt — no set-anchor, no close. When cmux behaves this way, the
+// adopt path can go.
+func TestCmuxGroupAdoptsNothingWhenCmuxAnchorsOnGiven(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.AnchorsOnGiven()
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	g, _ := fake.Group("reviews")
+	if g.AnchorID != "W1" || !reflect.DeepEqual(g.MemberIDs, []string{"W1"}) {
+		t.Fatalf("group = %+v", g)
+	}
+	if countCalls(fake.Calls(), "workspace-group set-anchor") != 0 || countCalls(fake.Calls(), "workspace close") != 0 {
+		t.Errorf("adopted an anchor that was already ours: %v", fake.Calls())
+	}
+}
+
+// TestCmuxGroupAddClosesNothing: joining a group that exists is one
+// add and nothing else — the adopt path belongs to creation.
+func TestCmuxGroupAddClosesNothing(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.AddWorkspace("pr-2", "W2")
+	fake.AddGroup("reviews", "W1")
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W2", Name: "pr-2"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, verb := range []string{"workspace close", "workspace-group set-anchor", "workspace-group create"} {
+		if n := countCalls(fake.Calls(), verb); n != 0 {
+			t.Errorf("%q ran %d times joining an existing group: %v", verb, n, fake.Calls())
+		}
+	}
 }
