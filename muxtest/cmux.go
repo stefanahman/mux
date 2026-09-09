@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -21,8 +22,9 @@ type FakeCmuxState struct {
 	Workspaces    []FakeCmuxWorkspace
 	Sessions      []FakeCmuxSession
 	Notifications []FakeCmuxNote
-	PS            FakePS              // tty → foreground commands
-	Typed         map[string][]string // surface id → text and keys, in order
+	Statuses      map[string][]FakeCmuxStatus // workspace id → sidebar status pills
+	PS            FakePS                      // tty → foreground commands
+	Typed         map[string][]string         // surface id → text and keys, in order
 	Calls         []string
 	Selected      string // workspace id
 	Focused       string // window ref
@@ -68,6 +70,12 @@ type FakeCmuxNote struct {
 	Read      bool   `json:"is_read"`
 }
 
+// FakeCmuxStatus is a sidebar status pill, what `set-status` writes
+// and `list-status` prints.
+type FakeCmuxStatus struct {
+	Key, Value, Icon, Color, Priority string
+}
+
 // FakePS is a fake process table: per tty, the foreground command
 // names. InstallFakeCmux puts a `ps` on PATH that prints it in the
 // form the driver reads (`tty stat comm`).
@@ -93,12 +101,34 @@ func loadFakeCmux() FakeCmuxState {
 	if st.Typed == nil {
 		st.Typed = map[string][]string{}
 	}
+	if st.Statuses == nil {
+		st.Statuses = map[string][]FakeCmuxStatus{}
+	}
 	return st
 }
 
+// saveFakeCmux writes the state whole: the driver runs several fakes
+// side by side, and one must never read another's half-written file.
 func saveFakeCmux(st FakeCmuxState) {
 	data, _ := json.Marshal(st)
-	_ = os.WriteFile(fakeCmuxStatePath(), data, 0o644)
+	tmp := fakeCmuxStatePath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err == nil {
+		_ = os.Rename(tmp, fakeCmuxStatePath())
+	}
+}
+
+// lockFakeCmux serialises the fakes' read-modify-write of the state
+// file, so parallel invocations lose neither calls nor changes.
+func lockFakeCmux() (unlock func()) {
+	f, err := os.OpenFile(filepath.Join(os.Getenv(FakeCmuxEnv), "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return func() {}
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}
 }
 
 // FakeCmuxMain is the CLI: the verbs the driver uses, with cmux's
@@ -112,6 +142,7 @@ func saveFakeCmux(st FakeCmuxState) {
 //		os.Exit(m.Run())
 //	}
 func FakeCmuxMain(args []string) int {
+	defer lockFakeCmux()()
 	st := loadFakeCmux()
 	st.Calls = append(st.Calls, strings.Join(args, " "))
 	defer func() { saveFakeCmux(st) }()
@@ -211,7 +242,8 @@ func FakeCmuxMain(args []string) int {
 		w.Panes = []FakeCmuxPane{{Ref: fmt.Sprintf("pane:%d", st.Next), Surfaces: []FakeCmuxSurface{root}}}
 		st.Workspaces = append(st.Workspaces, w)
 		fmt.Println("OK " + w.Ref)
-	case verb == "workspace select", verb == "workspace close", verb == "mark-notification-read", verb == "list-panes", verb == "list-pane-surfaces", verb == "new-surface":
+	case verb == "workspace select", verb == "workspace close", verb == "mark-notification-read", verb == "list-panes", verb == "list-pane-surfaces", verb == "new-surface", verb == "list-status",
+		len(words) == 2 && words[0] == "clear-status", len(words) == 3 && words[0] == "set-status":
 		i, ok := find(opts["--workspace"])
 		if !ok {
 			return fail("no such workspace " + opts["--workspace"])
@@ -263,6 +295,33 @@ func FakeCmuxMain(args []string) int {
 			s := newSurface("Terminal")
 			st.Workspaces[i].Panes[pi].Surfaces = append(st.Workspaces[i].Panes[pi].Surfaces, s)
 			fmt.Printf("OK %s %s %s\n", s.Ref, w.Panes[pi].Ref, w.Ref)
+		case "list-status":
+			// One line per pill, as cmux prints them; the value is not
+			// quoted, so one with spaces runs into ` icon=`. A pill set
+			// with a priority carries it as a fourth field.
+			if len(st.Statuses[w.ID]) == 0 {
+				fmt.Println("No status entries")
+			}
+			for _, p := range st.Statuses[w.ID] {
+				fmt.Printf("%s=%s icon=%s color=%s", p.Key, p.Value, p.Icon, p.Color)
+				if p.Priority != "" {
+					fmt.Printf(" priority=%s", p.Priority)
+				}
+				fmt.Println()
+			}
+		default: // set-status <key> <value>, clear-status <key>
+			key := words[1]
+			var kept []FakeCmuxStatus
+			for _, p := range st.Statuses[w.ID] {
+				if p.Key != key {
+					kept = append(kept, p)
+				}
+			}
+			if words[0] == "set-status" {
+				kept = append(kept, FakeCmuxStatus{Key: key, Value: words[2], Icon: opts["--icon"], Color: opts["--color"], Priority: opts["--priority"]})
+			}
+			st.Statuses[w.ID] = kept
+			fmt.Println("OK")
 		}
 	case len(words) == 2 && words[0] == "new-split":
 		wi, _, _, ok := surface(opts["--surface"])
@@ -390,6 +449,19 @@ func (f *FakeCmux) AddWorkspace(name, id string) {
 func (f *FakeCmux) AddSession(workspaceID, lifecycle string, live bool, updated string) {
 	f.Edit(func(st *FakeCmuxState) {
 		st.Sessions = append(st.Sessions, FakeCmuxSession{Workspace: workspaceID, Lifecycle: lifecycle, PIDExists: live, UpdatedAt: updated})
+	})
+}
+
+// AddStatus seeds a sidebar status pill: cmux's own under `claude_code`
+// (icon and colour, no priority), claude-status's under `claude`, set
+// with the priority its hooks pass.
+func (f *FakeCmux) AddStatus(workspaceID, key, value string) {
+	f.Edit(func(st *FakeCmuxState) {
+		pill := FakeCmuxStatus{Key: key, Value: value, Icon: "bell.fill", Color: "#4C8DFF"}
+		if key == "claude" {
+			pill.Priority = "90"
+		}
+		st.Statuses[workspaceID] = append(st.Statuses[workspaceID], pill)
 	})
 }
 
