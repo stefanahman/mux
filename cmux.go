@@ -32,10 +32,11 @@ func NewCmux() Cmux { return Cmux{cache: &cmuxSnapshot{}} }
 
 // cmuxSnapshot is what the driver has read of cmux so far.
 type cmuxSnapshot struct {
-	list  *cmuxList
-	tree  *cmuxTree
-	ps    *psTable
-	pills map[string]string // workspace id → claude-status's pill; nil until read
+	list   *cmuxList
+	tree   *cmuxTree
+	ps     *psTable
+	pills  map[string]string // workspace id → claude-status's pill; nil until read
+	groups *[]cmuxGroup      // the sidebar's groups; nil until read
 }
 
 // snapshot is where reads go: the kept one, or a throwaway.
@@ -589,6 +590,104 @@ func parsePill(out, key string) (string, bool) {
 		return strings.TrimSpace(v), true
 	}
 	return "", false
+}
+
+// cmuxGroup is one `workspace-group list` record: the collapsible
+// sidebar container, owned by the anchor workspace whose row is its
+// header. Closing the anchor promotes the next member, and the last
+// member leaving takes the group with it, so nothing has to be
+// cleaned up on the close path.
+type cmuxGroup struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	MemberIDs []string `json:"member_workspace_ids"`
+}
+
+// groups reads the sidebar's groups, once per run like the other
+// reads.
+func (c Cmux) groups() ([]cmuxGroup, error) {
+	snap := c.snapshot()
+	if snap.groups != nil {
+		return *snap.groups, nil
+	}
+	var r struct {
+		Groups []cmuxGroup `json:"groups"`
+	}
+	if err := c.runJSON(&r, "workspace-group", "list"); err != nil {
+		return nil, err
+	}
+	snap.groups = &r.Groups
+	return r.Groups, nil
+}
+
+// Group puts the workspace in the named group, creating it anchored
+// on that workspace the first time. `create --from` is what anchors it
+// on a workspace that already exists; `create` without it makes an
+// empty anchor workspace of its own, which would put a phantom row in
+// the sidebar for every group.
+//
+// The group is looked up by name, which is what the CLI offers:
+// `workspace-group list` prints no stable key of our own (the record
+// carries an external id, but only over raw rpc, and rpc's create is
+// the call that makes the phantom). So renaming a group in the sidebar
+// hides it from us, and the next call makes a second group under the
+// old name. That is the cost of the documented path, and a rename is
+// the user saying they want their own arrangement.
+//
+// Style is best effort. An unknown SF Symbol is stored as given —
+// cmux trims the name and keeps whatever it is handed — but a refused
+// colour or icon must not fail an open: the workspace is grouped
+// either way, and that is what the caller asked for.
+func (c Cmux) Group(name string, ws Workspace, style GroupStyle) error {
+	gs, err := c.groups()
+	if err != nil {
+		return err
+	}
+	for _, g := range gs {
+		if g.Name != name {
+			continue
+		}
+		for _, id := range g.MemberIDs {
+			if id == ws.ID {
+				return nil // already there
+			}
+		}
+		if _, err := c.run("workspace-group", "add", "--group", g.ID, "--workspace", ws.ID); err != nil {
+			return err
+		}
+		c.changed()
+		return nil
+	}
+	if _, err := c.run("workspace-group", "create", "--name", name, "--from", ws.ID); err != nil {
+		return err
+	}
+	c.changed()
+	c.style(name, style)
+	return nil
+}
+
+// style paints a group the caller named, quietly: the answer to
+// create is not parsed for a handle, the fresh list is read for one.
+func (c Cmux) style(name string, style GroupStyle) {
+	if style.Color == "" && style.Icon == "" {
+		return
+	}
+	gs, err := c.groups()
+	if err != nil {
+		return
+	}
+	for _, g := range gs {
+		if g.Name != name {
+			continue
+		}
+		if style.Color != "" {
+			_, _ = c.run("workspace-group", "set-color", g.ID, "--hex", style.Color)
+		}
+		if style.Icon != "" {
+			_, _ = c.run("workspace-group", "set-icon", g.ID, "--symbol", style.Icon)
+		}
+		return
+	}
 }
 
 // States speaks this package's words for every workspace. The first

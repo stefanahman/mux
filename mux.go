@@ -58,6 +58,36 @@ const (
 // multiplexer has no counterpart for.
 var ErrUnsupported = errors.New("not supported by this multiplexer")
 
+// GroupStyle is how a group is shown where the multiplexer shows it.
+type GroupStyle struct {
+	Color string // "#RRGGBB"; "" leaves the multiplexer's default
+	Icon  string // an SF Symbol name under cmux; "" for none
+}
+
+// Grouper is implemented by drivers that can hold workspaces in a
+// named, visible container. Only cmux has one: tmux's container is
+// the session a driver already holds its windows in, and herdr's API
+// has no grouping at all. It is a capability beside Driver rather
+// than a verb on it, so the two without it need no stub that lies.
+type Grouper interface {
+	// Group puts ws in the group called name, creating that group
+	// anchored on ws when it does not exist yet, and applying style on
+	// creation. An error means the grouping failed; a style the
+	// multiplexer refused does not, since a workspace in a plain group
+	// is the point and its colour is not.
+	Group(name string, ws Workspace, style GroupStyle) error
+}
+
+// Group puts ws in a named group when the driver has them, and does
+// nothing when it does not — the caller does not branch on Kind.
+func Group(d Driver, name string, ws Workspace, style GroupStyle) error {
+	g, ok := d.(Grouper)
+	if !ok {
+		return nil
+	}
+	return g.Group(name, ws, style)
+}
+
 // Driver is one multiplexer.
 type Driver interface {
 	// Kind names the multiplexer: tmux, herdr, cmux.

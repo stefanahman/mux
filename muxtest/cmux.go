@@ -412,6 +412,9 @@ func FakeCmuxMain(args []string) int {
 		st.Groups = append(st.Groups, g)
 		fmt.Println("OK " + g.Ref)
 	case verb == "workspace-group add":
+		if rejected("add") {
+			return fail("add: rejected")
+		}
 		gi, ok := group(opts["--group"])
 		if !ok {
 			return fail("no such group " + opts["--group"])

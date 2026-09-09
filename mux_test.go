@@ -580,3 +580,160 @@ func TestCmuxUnreachable(t *testing.T) {
 		t.Errorf("inside cmux the hint makes no sense: %v", err)
 	}
 }
+
+// TestCmuxGroups: a workspace joins a named sidebar group, the group
+// is made once and added to afterwards, and the style it is painted
+// with on creation never decides whether the grouping worked.
+func TestCmuxGroups(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.AddWorkspace("pr-2", "W2")
+	fake.AddWorkspace("bar-3", "W3")
+	style := mux.GroupStyle{Color: "#4C8DFF", Icon: "eye"}
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, style); err != nil {
+		t.Fatal(err)
+	}
+	g, ok := fake.Group("reviews")
+	if !ok || g.AnchorID != "W1" || !reflect.DeepEqual(g.MemberIDs, []string{"W1"}) {
+		t.Fatalf("after the first call: %+v, %v", g, ok)
+	}
+	if g.Color != "#4C8DFF" || g.Icon != "eye" {
+		t.Errorf("style not applied on creation: colour %q icon %q", g.Color, g.Icon)
+	}
+
+	// The second workspace joins that group; no second group is made.
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W2", Name: "pr-2"}, style); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := fake.Group("reviews"); !reflect.DeepEqual(g.MemberIDs, []string{"W1", "W2"}) {
+		t.Errorf("second call: members %v", g.MemberIDs)
+	}
+	if n := len(fake.Groups()); n != 1 {
+		t.Errorf("%d groups, want the one", n)
+	}
+	// Joining an existing group does not repaint it.
+	if n := countCalls(fake.Calls(), "workspace-group set-color"); n != 1 {
+		t.Errorf("set-color ran %d times, want once — on creation only", n)
+	}
+
+	// A member again changes nothing: it costs the read that finds it
+	// there, and no verb that writes.
+	adds, creates := countCalls(fake.Calls(), "workspace-group add"), countCalls(fake.Calls(), "workspace-group create")
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, style); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := fake.Group("reviews"); len(g.MemberIDs) != 2 {
+		t.Errorf("a member added twice: %v", g.MemberIDs)
+	}
+	if countCalls(fake.Calls(), "workspace-group add") != adds || countCalls(fake.Calls(), "workspace-group create") != creates {
+		t.Errorf("a workspace already in the group was written to cmux: %v", fake.Calls())
+	}
+
+	// A different name is a different group, anchored on its own
+	// workspace: the two lists do not share a container.
+	if err := mux.Group(d, "features", mux.Workspace{ID: "W3", Name: "bar-3"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	f, ok := fake.Group("features")
+	if !ok || f.AnchorID != "W3" || len(fake.Groups()) != 2 {
+		t.Fatalf("features: %+v, %v, %d groups", f, ok, len(fake.Groups()))
+	}
+	// An empty style paints nothing.
+	if f.Color != "" || f.Icon != "" {
+		t.Errorf("empty style painted: colour %q icon %q", f.Color, f.Icon)
+	}
+	if n := countCalls(fake.Calls(), "workspace-group set-icon"); n != 1 {
+		t.Errorf("set-icon ran %d times, want once — the styled group only", n)
+	}
+}
+
+// TestCmuxGroupReadsOnce: the group list is one read per run, like the
+// workspace list, and a change to it is seen.
+func TestCmuxGroupReadsOnce(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.AddWorkspace("pr-2", "W2")
+	fake.AddGroup("reviews", "W1")
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W2"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	// One list, one add: the second call sees the kept snapshot for the
+	// membership it already knows.
+	if n := countCalls(fake.Calls(), "workspace-group list"); n != 1 {
+		t.Errorf("the group list was read %d times, want once", n)
+	}
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W2"}, mux.GroupStyle{}); err != nil {
+		t.Fatal(err)
+	}
+	// The add forgot the snapshot, so this call read again — and found
+	// W2 a member, so it did nothing.
+	if n := countCalls(fake.Calls(), "workspace-group list"); n != 2 {
+		t.Errorf("after a change the list was read %d times, want twice", n)
+	}
+	if n := countCalls(fake.Calls(), "workspace-group add"); n != 1 {
+		t.Errorf("add ran %d times, want once", n)
+	}
+}
+
+// TestCmuxGroupStyleIsBestEffort: cmux refusing the icon leaves the
+// workspace grouped and the caller none the wiser — an SF Symbol name
+// comes from a config file, and a wrong one must not stop an open.
+func TestCmuxGroupStyleIsBestEffort(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.Reject("set-icon")
+
+	d := mux.NewCmux()
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1"}, mux.GroupStyle{Color: "#4C8DFF", Icon: "nonesuch"}); err != nil {
+		t.Fatalf("a refused icon failed the grouping: %v", err)
+	}
+	g, ok := fake.Group("reviews")
+	if !ok || !reflect.DeepEqual(g.MemberIDs, []string{"W1"}) {
+		t.Fatalf("not grouped: %+v, %v", g, ok)
+	}
+	if g.Icon != "" {
+		t.Errorf("the fake refused set-icon, yet the icon is %q", g.Icon)
+	}
+	if g.Color != "#4C8DFF" {
+		t.Errorf("the colour before it should still be set: %q", g.Color)
+	}
+
+	// The grouping itself is the other half: when cmux refuses that,
+	// the caller hears about it.
+	fake.AddWorkspace("pr-2", "W2")
+	fake.Reject("add")
+	if err := mux.Group(d, "reviews", mux.Workspace{ID: "W2"}, mux.GroupStyle{}); err == nil {
+		t.Error("a refused add reported success")
+	}
+	if g, _ := fake.Group("reviews"); len(g.MemberIDs) != 1 {
+		t.Errorf("the refused workspace joined anyway: %v", g.MemberIDs)
+	}
+}
+
+// TestGroupWithoutGrouper: tmux and herdr have no groups, so the
+// package function is a no-op there rather than an error the caller
+// has to know to ignore.
+func TestGroupWithoutGrouper(t *testing.T) {
+	for _, d := range []mux.Driver{mux.Tmux{SessionName: "reviews"}, mux.NewHerdr("/nonexistent/herdr.sock")} {
+		if err := mux.Group(d, "reviews", mux.Workspace{ID: "W1", Name: "pr-1"}, mux.GroupStyle{Color: "#4C8DFF"}); err != nil {
+			t.Errorf("%s: %v", d.Kind(), err)
+		}
+	}
+}
+
+// countCalls counts the fake's invocations naming verb. Not a prefix
+// match: a read carries the driver's global flags in front of it
+// (`--json --id-format both workspace-group list`).
+func countCalls(calls []string, verb string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.Contains(c, verb) {
+			n++
+		}
+	}
+	return n
+}
