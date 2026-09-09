@@ -23,11 +23,13 @@ type FakeCmuxState struct {
 	Sessions      []FakeCmuxSession
 	Notifications []FakeCmuxNote
 	Statuses      map[string][]FakeCmuxStatus // workspace id → sidebar status pills
+	Groups        []FakeCmuxGroup             // sidebar workspace groups
 	PS            FakePS                      // tty → foreground commands
 	Typed         map[string][]string         // surface id → text and keys, in order
 	Calls         []string
-	Selected      string // workspace id
-	Focused       string // window ref
+	Rejects       []string // verbs the fake fails, for the caller's error paths
+	Selected      string   // workspace id
+	Focused       string   // window ref
 }
 
 // FakeCmuxWorkspace mirrors a `workspace list` record.
@@ -74,6 +76,19 @@ type FakeCmuxNote struct {
 // and `list-status` prints.
 type FakeCmuxStatus struct {
 	Key, Value, Icon, Color, Priority string
+}
+
+// FakeCmuxGroup mirrors a `workspace-group list` record: the sidebar
+// container, owned by the anchor workspace whose row is its header.
+type FakeCmuxGroup struct {
+	ID        string   `json:"id"`
+	Ref       string   `json:"ref"`
+	Name      string   `json:"name"`
+	AnchorID  string   `json:"anchor_workspace_id"`
+	AnchorRef string   `json:"anchor_workspace_ref"`
+	MemberIDs []string `json:"member_workspace_ids"`
+	Color     string   `json:"custom_color"`
+	Icon      string   `json:"icon_symbol"`
 }
 
 // FakePS is a fake process table: per tty, the foreground command
@@ -164,6 +179,22 @@ func FakeCmuxMain(args []string) int {
 		}
 	}
 	fail := func(msg string) int { fmt.Fprintln(os.Stderr, "cmux: "+msg); return 1 }
+	rejected := func(verb string) bool {
+		for _, r := range st.Rejects {
+			if r == verb {
+				return true
+			}
+		}
+		return false
+	}
+	group := func(handle string) (int, bool) {
+		for i, g := range st.Groups {
+			if g.ID == handle || g.Ref == handle {
+				return i, true
+			}
+		}
+		return 0, false
+	}
 	find := func(handle string) (int, bool) {
 		for i, w := range st.Workspaces {
 			if w.Ref == handle || w.ID == handle {
@@ -352,6 +383,84 @@ func FakeCmuxMain(args []string) int {
 			st.Typed[id] = append(st.Typed[id], words[1])
 		}
 		fmt.Println("OK " + opts["--surface"])
+	case verb == "workspace-group list":
+		return out(map[string]any{"window_ref": "window:1", "window_id": "WIN-1", "groups": st.Groups})
+	case verb == "workspace-group create":
+		// --from takes the workspaces to capture, the first of them the
+		// anchor. Without it cmux makes an anchor-only group with a
+		// workspace of its own; the driver never asks for that, so the
+		// fake does not answer it.
+		from := strings.Split(opts["--from"], ",")
+		if opts["--from"] == "" {
+			return fail("workspace-group create: --from is required here")
+		}
+		for _, id := range from {
+			if _, ok := find(id); !ok {
+				return fail("no such workspace " + id)
+			}
+		}
+		st.Next++
+		anchor, _ := find(from[0])
+		g := FakeCmuxGroup{
+			ID:        fmt.Sprintf("GRP-%d", st.Next),
+			Ref:       fmt.Sprintf("workspace_group:%d", st.Next),
+			Name:      opts["--name"],
+			AnchorID:  st.Workspaces[anchor].ID,
+			AnchorRef: st.Workspaces[anchor].Ref,
+			MemberIDs: from,
+		}
+		st.Groups = append(st.Groups, g)
+		fmt.Println("OK " + g.Ref)
+	case verb == "workspace-group add":
+		gi, ok := group(opts["--group"])
+		if !ok {
+			return fail("no such group " + opts["--group"])
+		}
+		wi, ok := find(opts["--workspace"])
+		if !ok {
+			return fail("no such workspace " + opts["--workspace"])
+		}
+		id := st.Workspaces[wi].ID
+		for _, m := range st.Groups[gi].MemberIDs {
+			if m == id {
+				return fail("workspace already in the group")
+			}
+		}
+		st.Groups[gi].MemberIDs = append(st.Groups[gi].MemberIDs, id)
+		fmt.Println("OK " + st.Groups[gi].Ref)
+	case verb == "workspace-group remove":
+		wi, ok := find(opts["--workspace"])
+		if !ok {
+			return fail("no such workspace " + opts["--workspace"])
+		}
+		id := st.Workspaces[wi].ID
+		for gi := range st.Groups {
+			var kept []string
+			for _, m := range st.Groups[gi].MemberIDs {
+				if m != id {
+					kept = append(kept, m)
+				}
+			}
+			st.Groups[gi].MemberIDs = kept
+		}
+		fmt.Println("OK")
+	case len(words) >= 2 && words[0] == "workspace-group" && (words[1] == "set-color" || words[1] == "set-icon"):
+		if rejected(words[1]) {
+			return fail(words[1] + ": rejected")
+		}
+		if len(words) < 3 {
+			return fail(words[1] + ": a group is required")
+		}
+		gi, ok := group(words[2])
+		if !ok {
+			return fail("no such group " + words[2])
+		}
+		if words[1] == "set-color" {
+			st.Groups[gi].Color = opts["--hex"]
+		} else {
+			st.Groups[gi].Icon = opts["--symbol"]
+		}
+		fmt.Println("OK " + st.Groups[gi].Ref)
 	case verb == "sessions":
 		return out(map[string]any{"sessions": st.Sessions, "total_matches": len(st.Sessions)})
 	case verb == "list-notifications":
@@ -463,6 +572,38 @@ func (f *FakeCmux) AddStatus(workspaceID, key, value string) {
 		}
 		st.Statuses[workspaceID] = append(st.Statuses[workspaceID], pill)
 	})
+}
+
+// AddGroup seeds a group anchored on the first workspace given.
+func (f *FakeCmux) AddGroup(name string, workspaceIDs ...string) {
+	f.Edit(func(st *FakeCmuxState) {
+		st.Next++
+		g := FakeCmuxGroup{ID: fmt.Sprintf("GRP-%d", st.Next), Ref: fmt.Sprintf("workspace_group:%d", st.Next), Name: name, MemberIDs: workspaceIDs}
+		if len(workspaceIDs) > 0 {
+			g.AnchorID = workspaceIDs[0]
+		}
+		st.Groups = append(st.Groups, g)
+	})
+}
+
+// Groups is what the fake holds, in cmux's order.
+func (f *FakeCmux) Groups() []FakeCmuxGroup { return f.State().Groups }
+
+// Group is the group with that name.
+func (f *FakeCmux) Group(name string) (FakeCmuxGroup, bool) {
+	for _, g := range f.Groups() {
+		if g.Name == name {
+			return g, true
+		}
+	}
+	return FakeCmuxGroup{}, false
+}
+
+// Reject makes the fake fail those verbs — the second word of a
+// `workspace-group` subcommand — so a caller's error path can be
+// tested against a cmux that refuses.
+func (f *FakeCmux) Reject(verbs ...string) {
+	f.Edit(func(st *FakeCmuxState) { st.Rejects = append(st.Rejects, verbs...) })
 }
 
 // AddNote seeds a notification.
