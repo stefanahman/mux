@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Cmux drives the cmux application through its CLI. Handles are
@@ -31,9 +32,10 @@ func NewCmux() Cmux { return Cmux{cache: &cmuxSnapshot{}} }
 
 // cmuxSnapshot is what the driver has read of cmux so far.
 type cmuxSnapshot struct {
-	list *cmuxList
-	tree *cmuxTree
-	ps   *psTable
+	list  *cmuxList
+	tree  *cmuxTree
+	ps    *psTable
+	pills map[string]string // workspace id → claude-status's pill; nil until read
 }
 
 // snapshot is where reads go: the kept one, or a throwaway.
@@ -525,13 +527,90 @@ func (c Cmux) unread() map[string]bool {
 	return m
 }
 
-// States maps cmux's words onto this package's, from the hook store's
-// live records: running is working, needsInput is blocked, idle is
-// done while cmux's notification about the finished turn is unread
-// and idle once it has been read. A workspace without a live record —
-// no agent, or one the wrapper never saw — is "".
+// claudePill is the sidebar status pill claude-status's hooks keep per
+// workspace: its key, and the four words it holds.
+const claudePill = "claude"
+
+// pills reads claude-status's pill of every workspace, one list-status
+// per workspace, run side by side: a call costs ~0.15 s of cmux CLI
+// start-up, the same for one as for fifteen in parallel. A workspace
+// without the pill — no Claude there, or the plugin not installed — is
+// absent from the map; so is one whose read failed, closed meanwhile.
+func (c Cmux) pills() (map[string]string, error) {
+	snap := c.snapshot()
+	if snap.pills != nil {
+		return snap.pills, nil
+	}
+	r, err := c.list()
+	if err != nil {
+		return nil, err
+	}
+	pills := map[string]string{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, 8)
+	for _, w := range r.Workspaces {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			out, err := c.run("list-status", "--workspace", id)
+			if err != nil {
+				return
+			}
+			if v, ok := parsePill(out, claudePill); ok {
+				mu.Lock()
+				pills[id] = v
+				mu.Unlock()
+			}
+		}(w.ID)
+	}
+	wg.Wait()
+	snap.pills = pills
+	return pills, nil
+}
+
+// parsePill finds key's value in list-status output: one pill per
+// line as `key=value icon=NAME color=#HEX`, plus `priority=N` for one
+// set with a priority; the value is unquoted (cmux's own
+// `claude_code=Needs input …` has a space in it), so it runs up to
+// ` icon=`. No pills is the single line `No status entries`.
+func parsePill(out, key string) (string, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, key+"=") {
+			continue
+		}
+		v := strings.TrimPrefix(line, key+"=")
+		if i := strings.Index(v, " icon="); i >= 0 {
+			v = v[:i]
+		}
+		return strings.TrimSpace(v), true
+	}
+	return "", false
+}
+
+// States speaks this package's words for every workspace. The first
+// word is claude-status's: its hooks write a pill (`claude=working`,
+// `blocked`, `done`, `idle`) from the events that mean those things,
+// and `done` stays done while cmux's notification about the turn is
+// unread, idle once it has been read (cmux clears it on a visit; Seen
+// marks it). Without the pill the hook store's live record decides:
+// running is working, needsInput is blocked, idle is done or idle by
+// the same notification. That record is the fallback, not the source,
+// because cmux folds Claude Code's idle reminder — the notification
+// sent 60 seconds after every finished turn — into needsInput (its
+// AgentHookNotificationPolicy: `.needsPermission, .idleReminder →
+// .needsInput`), so most idle sessions read as blocked there. A
+// workspace with neither — no agent, or one the wrapper never saw —
+// is "".
 func (c Cmux) States() (map[string]string, error) {
 	r, err := c.list()
+	if err != nil {
+		return nil, err
+	}
+	pills, err := c.pills()
 	if err != nil {
 		return nil, err
 	}
@@ -547,9 +626,28 @@ func (c Cmux) States() (map[string]string, error) {
 		}
 	}
 	var unread map[string]bool
+	seen := func(id string) bool {
+		if unread == nil {
+			unread = c.unread()
+		}
+		return !unread[id]
+	}
 	states := map[string]string{}
 	for _, w := range r.Workspaces {
 		states[w.name()] = ""
+		if pill, ok := pills[w.ID]; ok {
+			switch pill {
+			case Working, Blocked, Idle:
+				states[w.name()] = pill
+			case Done:
+				if seen(w.ID) {
+					states[w.name()] = Idle
+				} else {
+					states[w.name()] = Done
+				}
+			}
+			continue
+		}
 		s, ok := live[w.ID]
 		if !ok {
 			continue
@@ -560,13 +658,10 @@ func (c Cmux) States() (map[string]string, error) {
 		case "needsInput":
 			states[w.name()] = Blocked
 		case "idle":
-			if unread == nil {
-				unread = c.unread()
-			}
-			if unread[w.ID] {
-				states[w.name()] = Done
-			} else {
+			if seen(w.ID) {
 				states[w.name()] = Idle
+			} else {
+				states[w.name()] = Done
 			}
 		}
 	}

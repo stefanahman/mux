@@ -478,6 +478,49 @@ func TestCmux(t *testing.T) {
 		t.Errorf("States() = %v, %v; want %v", got, err, want)
 	}
 
+	// claude-status's pill comes before the hook store: cmux's record
+	// says needsInput for the idle reminder too, so the pill decides
+	// wherever the plugin wrote one, and the record only without it.
+	fake.AddStatus("W1", "claude_code", "Needs input") // cmux's own pill: not ours
+	fake.AddStatus("W2", "claude_code", "Needs input") // a value with a space, before ours
+	fake.AddStatus("W2", "claude", "idle")             // the record says needsInput: the reminder
+	fake.AddStatus("W3", "claude", "done")             // its note is unread
+	fake.AddStatus("W4", "claude", "blocked")          // the record says idle
+	fake.AddStatus("W5", "claude", "working")          // the record is stale, the pill is not
+	fake.AddStatus("W6", "claude", "done")             // no record at all; its note read
+	fake.AddNote("W6", true)
+	want = map[string]string{"~": "", "pr-42-fix": "", "pr-1-working": mux.Working, "pr-2-blocked": mux.Idle, "pr-3-done": mux.Done, "pr-4-idle": mux.Blocked, "pr-5-stale": mux.Working, "pr-6-none": mux.Idle}
+	reads := func() int {
+		n := 0
+		for _, c := range fake.Calls() {
+			if strings.HasPrefix(c, "list-status ") {
+				n++
+			}
+		}
+		return n
+	}
+	p := mux.NewCmux()
+	before = reads()
+	if got, err := p.States(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("States() with pills = %v, %v; want %v", got, err, want)
+	}
+	if n, workspaces := reads()-before, len(fake.State().Workspaces); n != workspaces {
+		t.Errorf("reading the pills took %d list-status calls for %d workspaces", n, workspaces)
+	}
+	before = reads()
+	if _, err := p.States(); err != nil {
+		t.Fatal(err)
+	}
+	if reads() != before {
+		t.Error("a second States() on the same run reads the pills again")
+	}
+	if err := p.Seen(mux.Workspace{ID: "W3", Name: "pr-3-done"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := p.States(); got["pr-3-done"] != mux.Idle || reads() == before {
+		t.Errorf("after Seen the pill's done is idle: %v (pills re-read: %v)", got["pr-3-done"], reads() != before)
+	}
+
 	fake.AddNote(ws.ID, false)
 	if err := d.Select(ws); err != nil {
 		t.Fatal(err)
