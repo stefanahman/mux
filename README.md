@@ -37,7 +37,7 @@ review session, `pr-reviews` with a `scratch` keepalive window; set
 | pane | a pane | a pane | a terminal surface |
 | tab (`AddTab`) | — (`ErrUnsupported`) | a tab | a surface in the first pane |
 | `Layout` | the window as one tab | tabs with their panes | the first pane's surfaces as tabs; the other panes, cmux's workspace-wide splits, listed under the first |
-| the agent's state | `@claude-state`, written by [tmux-claude-status](https://github.com/stefanahman/tmux-claude-status) | herdr's own detection, from the screen | cmux's Claude Code hooks, through the wrapper it puts on the shell's PATH |
+| the agent's state | `@claude-state`, written by [claude-status](https://github.com/stefanahman/claude-status) | herdr's own detection, from the screen | claude-status's pill when the plugin runs there, else cmux's Claude Code hooks (whose needsInput also covers the idle reminder) |
 | `Prompt` | keystrokes | `agent.prompt`, which refuses while the agent is blocked; keystrokes for an agent herdr has not detected | keystrokes |
 | `Processes` | the pane's current command | the pane's foreground processes | `ps` on the surface's tty where cmux knows it; else what the tab's title names |
 | `Inside` | `TMUX` | `HERDR_ENV=1` | `CMUX_WORKSPACE_ID` |
@@ -73,18 +73,28 @@ cmux unless cmux was launched with `CMUX_SOCKET_MODE=allowAll`;
 The hooks are cmux's Claude Code integration, on through
 `automation.claudeCodeIntegration: true` in `~/.config/cmux/cmux.json`.
 Its terminals carry `CMUX_SURFACE_ID`, which its Claude Code wrapper
-checks before injecting the hooks. Hook records
-come from `cmux sessions --agent claude`: `running`, `needsInput`,
-`idle`, kept after the agent exits (`stored_pid_exists` tells). `done`
-is idle with cmux's notification about the turn unread; `Seen` marks
-them read (pr-owl calls it when the user arrives). cmux knows the tty only of the surface a workspace was
+checks before injecting the hooks. The state is read from two places.
+First claude-status's sidebar pill, `claude=working|blocked|done|idle`
+(`cmux list-status --workspace <id>`, one call per workspace, run side
+by side: the CLI's start-up is the cost, the same for one as for
+fifteen), which its hooks write from the events that mean those words.
+Without the pill, the hook records from `cmux sessions --agent claude`:
+`running`, `needsInput`, `idle`, kept after the agent exits
+(`stored_pid_exists` tells). Those are the fallback because cmux sets
+`needsInput` on Claude Code's idle reminder too — the notification
+sent 60 seconds after a finished turn — so a session at its prompt
+reads as blocked there once a minute has passed. Either way `done` is
+done while cmux's notification about the turn is unread; `Seen` marks
+them read (owl calls it when the user arrives), and a visit in cmux
+does the same. cmux knows the tty only of the surface a workspace was
 created with; a tab or split made through its API has none, and its
 `top` samples miss idle programs. So `Processes` runs `ps` on the tty
 where there is one — exact — and otherwise reads the tab's title, which
 cmux's shell integration keeps: the running program's line, or the
 directory at a prompt (`Terminal` before the first one). Reads come
-from one snapshot per driver (`NewCmux`): the list, the tree and `ps`,
-taken once and dropped when the driver changes something.
+from one snapshot per driver (`NewCmux`): the list, the tree, the
+pills and `ps`, taken once and dropped when the driver changes
+something.
 
 ## A tainted server or app
 
