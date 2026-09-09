@@ -43,7 +43,18 @@ review session, `pr-reviews` with a `scratch` keepalive window; set
 | `Inside` | `TMUX` | `HERDR_ENV=1` | `CMUX_WORKSPACE_ID` |
 | `Focus` | `switch-client` | nothing: every client follows `Select` | `focus-window`, from outside cmux |
 | `Notify` | the status line, eight seconds; nothing outside tmux | a herdr notification | a cmux notification |
+| grouping (`mux.Group`) | — the session already is the container | — no grouping in its API | a collapsible sidebar group, anchored on its first member |
 | transport | the `tmux` command | the session's socket, newline JSON | the `cmux` command |
+
+`Group` is a capability, not a Driver verb: `mux.Group(d, name, ws,
+style)` puts a workspace in a named group where the multiplexer has
+them, and does nothing where it does not, so a caller never branches on
+`Kind`. Only `Cmux` implements `Grouper`. The group is created on the
+first workspace that needs it and anchored there, found by name
+afterwards, and it disappears with its last member. `GroupStyle`'s
+colour and SF Symbol are applied on creation and are best effort: a
+style the multiplexer refuses leaves the workspace grouped and returns
+no error.
 
 `States` speaks four words: `working`, `blocked` (a permission or a
 question waits), `done` (finished, not yet looked at), `idle`; `""` is
