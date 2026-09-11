@@ -121,8 +121,12 @@ func (Cmux) Kind() string { return "cmux" }
 // terminal it runs.
 func (Cmux) Inside() bool { return os.Getenv("CMUX_WORKSPACE_ID") != "" }
 
-// ChildEnv is empty: a child inherits cmux's variables with the rest.
-func (Cmux) ChildEnv() []string { return nil }
+// ChildEnv carries the socket when this driver names one, and nothing
+// otherwise: a child started inside cmux inherits the app's variables
+// with the rest, but one started outside it — by a hotkey, against a
+// machine running two builds — would reach whichever app owns the
+// default socket rather than the one its parent was driving.
+func (c Cmux) ChildEnv() []string { return c.socketEnv() }
 
 // Ping asks cmux; its socket admits only processes started inside
 // cmux unless cmux was launched with CMUX_SOCKET_MODE=allowAll. It

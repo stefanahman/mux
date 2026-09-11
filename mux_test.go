@@ -1112,6 +1112,14 @@ func TestCmuxSocketAimsEveryCall(t *testing.T) {
 	if _, err := d.Workspaces(); err != nil {
 		t.Fatal(err)
 	}
+	// A child started outside cmux — by a hotkey — has no app to
+	// inherit the socket from, so the driver has to hand it over.
+	if got, want := d.ChildEnv(), []string{"CMUX_SOCKET_PATH=" + socket}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ChildEnv = %v, want %v", got, want)
+	}
+	if got := mux.NewCmux().ChildEnv(); len(got) != 0 {
+		t.Errorf("ChildEnv with no socket = %v, want nothing", got)
+	}
 	for _, call := range fake.Calls() {
 		if !strings.HasSuffix(call, " @"+socket) {
 			t.Errorf("call %q did not carry the socket", call)
