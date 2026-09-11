@@ -82,6 +82,25 @@ event stream instead (its `docs/events.md`), and while a watch is live
 `States()` answers from what the stream has told the driver, running
 nothing.
 
+Three things a caller has to get right, each of which cost owl a day:
+
+- **One driver, kept.** `Watch` hangs the subscription off the instance
+  it is called on. A caller that builds a driver per read subscribes one
+  of them and goes on fanning out from all the others — the calls do not
+  drop and nothing says why. Keep the driver that was watched for as
+  long as the watch, and read through it.
+- **A kept driver without a live watch freezes.** Reads fill a snapshot
+  that only a mutating call clears; a watch bypasses it, which is what
+  makes keeping the driver correct. If `Watch` failed and the driver is
+  kept anyway, `States()` answers with the states it saw first, forever:
+  no error, no staleness, a list that simply stops moving. Drop the
+  driver whenever the watch does not start.
+- **The timer still matters where there is no stream.** Under tmux and
+  herdr `Watch` returns `nil` and the timer is the only thing that moves
+  a state, so an interval chosen for a watched cmux is a regression
+  there. Pick it from whether a watch is actually live — owl uses 30s
+  watched, 2s not.
+
 The pills come from the frames: `set_status` and `clear_status` are the
 only writers, so applying them is exact. The workspace list, the hook
 store and the notifications do not travel in their events — those say
