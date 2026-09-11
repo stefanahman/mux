@@ -582,10 +582,6 @@ func FakeCmuxMain(args []string) int {
 func fakeCmuxEventsPath() string { return filepath.Join(os.Getenv(FakeCmuxEnv), "events.ndjson") }
 func fakeCmuxCursorPath() string { return filepath.Join(os.Getenv(FakeCmuxEnv), "events.cursor") }
 
-// fakeCmuxEndFrame is the sentinel that ends a stream: the test's way
-// of saying the subscription dropped or cmux went away.
-const fakeCmuxEndFrame = `{"__muxtest":"end"}`
-
 // fakeCmuxEvents serves `cmux events`: the ack cmux sends on
 // subscribing, then every frame the test pushes, until the sentinel or
 // the process is killed.
@@ -611,6 +607,8 @@ func fakeCmuxEvents(boot string, gap bool) int {
 		if served < len(lines) {
 			line := lines[served]
 			_ = os.WriteFile(fakeCmuxCursorPath(), []byte(fmt.Sprint(served+1)), 0o644)
+			// The sentinel EndStream queues: the test's way of saying
+			// the subscription dropped or cmux went away.
 			if strings.Contains(line, `"__muxtest":"end"`) {
 				return 0
 			}

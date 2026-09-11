@@ -38,6 +38,7 @@ type cmuxSnapshot struct {
 	ps     *psTable
 	pills  map[string]string // workspace id → claude-status's pill; nil until read
 	groups *[]cmuxGroup      // the sidebar's groups; nil until read
+	watch  *cmuxWatch        // the live event subscription, when Watch started one
 }
 
 // snapshot is where reads go: the kept one, or a throwaway.
@@ -48,11 +49,27 @@ func (c Cmux) snapshot() *cmuxSnapshot {
 	return &cmuxSnapshot{}
 }
 
-// changed forgets the snapshot: the next read sees what cmux does.
+// changed forgets the snapshot: the next read sees what cmux does. A
+// live watch survives it — the subscription is not a cached read — but
+// is told, because our own write changes what States() should answer
+// and cmux's event for it may arrive a moment later.
 func (c Cmux) changed() {
-	if c.cache != nil {
-		*c.cache = cmuxSnapshot{}
+	if c.cache == nil {
+		return
 	}
+	w := c.cache.watch
+	*c.cache = cmuxSnapshot{watch: w}
+	if w != nil {
+		w.stale(cmuxStaleAll)
+	}
+}
+
+// watcher is the live subscription, or nil when there is none.
+func (c Cmux) watcher() *cmuxWatch {
+	if c.cache == nil {
+		return nil
+	}
+	return c.cache.watch
 }
 
 // run runs one cmux command and returns trimmed stdout. CMUX_QUIET
@@ -755,7 +772,13 @@ func (c Cmux) style(name string, style GroupStyle) {
 // workspace with neither — no agent, or one the wrapper never saw —
 // is "".
 func (c Cmux) States() (map[string]string, error) {
-	r, err := c.list()
+	// A live watch already holds all four, kept current by cmux's
+	// events, so the answer costs nothing to give.
+	if w := c.watcher(); w != nil {
+		v := w.snapshot()
+		return statesFrom(v.list, v.pills, v.sessions, func(id string) bool { return !v.unread[id] }), nil
+	}
+	list, err := c.list()
 	if err != nil {
 		return nil, err
 	}
@@ -763,17 +786,9 @@ func (c Cmux) States() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var store struct {
-		Sessions []cmuxSession `json:"sessions"`
-	}
-	live := map[string]cmuxSession{}
-	if err := c.runJSON(&store, "sessions", "--agent", "claude"); err == nil {
-		for _, s := range store.Sessions {
-			if s.PIDExists && s.UpdatedAt >= live[s.Workspace].UpdatedAt {
-				live[s.Workspace] = s
-			}
-		}
-	}
+	// The notifications are read only if a done or an idle asks: they
+	// answer nothing else, and a list of plain states should not pay
+	// for them.
 	var unread map[string]bool
 	seen := func(id string) bool {
 		if unread == nil {
@@ -781,8 +796,34 @@ func (c Cmux) States() (map[string]string, error) {
 		}
 		return !unread[id]
 	}
+	return statesFrom(list, pills, c.sessions(), seen), nil
+}
+
+// sessions is cmux's hook store by workspace: the latest record whose
+// process still exists, which is the only one that says anything about
+// now.
+func (c Cmux) sessions() map[string]cmuxSession {
+	live := map[string]cmuxSession{}
+	var store struct {
+		Sessions []cmuxSession `json:"sessions"`
+	}
+	if err := c.runJSON(&store, "sessions", "--agent", "claude"); err != nil {
+		return live
+	}
+	for _, s := range store.Sessions {
+		if s.PIDExists && s.UpdatedAt >= live[s.Workspace].UpdatedAt {
+			live[s.Workspace] = s
+		}
+	}
+	return live
+}
+
+// statesFrom is the reading itself, over what has already been read:
+// the same answer whether a watch keeps those four or a poll just
+// fetched them.
+func statesFrom(list cmuxList, pills map[string]string, live map[string]cmuxSession, seen func(id string) bool) map[string]string {
 	states := map[string]string{}
-	for _, w := range r.Workspaces {
+	for _, w := range list.Workspaces {
 		states[w.name()] = ""
 		if pill, ok := pills[w.ID]; ok {
 			switch pill {
@@ -814,7 +855,7 @@ func (c Cmux) States() (map[string]string, error) {
 			}
 		}
 	}
-	return states, nil
+	return states
 }
 
 // Select shows the workspace in its window.

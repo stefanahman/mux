@@ -7,6 +7,7 @@
 package mux
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -86,6 +87,30 @@ func Group(d Driver, name string, ws Workspace, style GroupStyle) error {
 		return nil
 	}
 	return g.Group(name, ws, style)
+}
+
+// Watcher is implemented by drivers whose multiplexer can say when
+// something changed, instead of being asked again. Only cmux has a
+// stream to listen to; tmux has none, and herdr's is not read yet.
+type Watcher interface {
+	// Watch signals on the returned channel whenever a later States()
+	// would answer differently, and keeps the driver's own view current
+	// so that States() runs nothing while the watch is live. Signals
+	// coalesce: a caller that reads slowly loses the count, never the
+	// change. The channel closes when ctx is done.
+	Watch(ctx context.Context) (<-chan struct{}, error)
+}
+
+// Watch starts a driver's watch when it has one, and answers nil when
+// it does not — the caller keeps its timer for those and does not
+// branch on Kind. A nil channel blocks forever in a select, which is
+// what a caller polling beside it wants.
+func Watch(d Driver, ctx context.Context) (<-chan struct{}, error) {
+	w, ok := d.(Watcher)
+	if !ok {
+		return nil, nil
+	}
+	return w.Watch(ctx)
 }
 
 // Driver is one multiplexer.

@@ -1,6 +1,7 @@
 package mux_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stefanahman/mux"
 	"github.com/stefanahman/mux/muxtest"
@@ -871,5 +873,249 @@ func TestCmuxGroupAddClosesNothing(t *testing.T) {
 		if n := countCalls(fake.Calls(), verb); n != 0 {
 			t.Errorf("%q ran %d times joining an existing group: %v", verb, n, fake.Calls())
 		}
+	}
+}
+
+// waitSignal waits for the watch to say something changed. A test that
+// waits on nothing would pass by luck, so a silent watch fails here.
+func waitSignal(t *testing.T, sig <-chan struct{}) {
+	t.Helper()
+	select {
+	case _, ok := <-sig:
+		if !ok {
+			t.Fatal("the watch closed while the test was waiting")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch said nothing within 5s")
+	}
+}
+
+// TestCmuxWatchServesStatesFromTheStream: the point of the whole
+// change. A watched driver answers States() from what cmux told it,
+// running nothing — where an unwatched one reads a pill per workspace
+// every time it is asked.
+func TestCmuxWatchServesStatesFromTheStream(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	for i, name := range []string{"pr-1", "pr-2", "pr-3"} {
+		fake.AddWorkspace(name, "W"+string(rune('1'+i)))
+	}
+	fake.AddStatus("W1", "claude", "working")
+	fake.AddStatus("W2", "claude", "idle")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := mux.NewCmux()
+	sig, err := mux.Watch(d, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sig == nil {
+		t.Fatal("cmux gave no channel; it implements Watcher")
+	}
+
+	want := map[string]string{"pr-1": mux.Working, "pr-2": mux.Idle, "pr-3": ""}
+	if got, err := d.States(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("States() while watching = %v, %v; want %v", got, err, want)
+	}
+	// Every read from here is free: the first one filled the view, and
+	// the stream keeps it.
+	before := countCalls(fake.Calls(), "list-status ")
+	for range 5 {
+		if _, err := d.States(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := countCalls(fake.Calls(), "list-status ") - before; n != 0 {
+		t.Errorf("five States() while watching ran %d list-status calls, want none", n)
+	}
+
+	// cmux says a pill changed; the driver takes it from the frame.
+	fake.PushStatus("W3", "claude", "blocked")
+	waitSignal(t, sig)
+	want["pr-3"] = mux.Blocked
+	if got, _ := d.States(); !reflect.DeepEqual(got, want) {
+		t.Errorf("after set_status States() = %v; want %v", got, want)
+	}
+	if n := countCalls(fake.Calls(), "list-status ") - before; n != 0 {
+		t.Errorf("applying a pill event ran %d list-status calls, want none", n)
+	}
+
+	// A pill going away takes the state with it.
+	fake.PushStatusCleared("W1", "claude")
+	waitSignal(t, sig)
+	want["pr-1"] = ""
+	if got, _ := d.States(); !reflect.DeepEqual(got, want) {
+		t.Errorf("after clear_status States() = %v; want %v", got, want)
+	}
+
+	// cmux's own pill is not ours: its value carries a space, and its
+	// key is not the one claude-status writes. A heartbeat in between
+	// says the socket lives and nothing more.
+	fake.PushStatus("W2", "claude_code", "Needs input")
+	fake.PushHeartbeat()
+	fake.PushStatus("W2", "claude", "working")
+	waitFor(t, func() bool {
+		got, _ := d.States()
+		return got["pr-2"] == mux.Working
+	}, "our pill to land past cmux's")
+	if n := countCalls(fake.Calls(), "list-status ") - before; n != 0 {
+		t.Errorf("a whole stream of pill events ran %d list-status calls, want none", n)
+	}
+}
+
+// TestCmuxWatchRereadsWhatFramesDoNotCarry: a workspace event says
+// something changed without saying what it is now, so the list is read
+// again — and the new workspace shows up without the caller asking.
+func TestCmuxWatchRereadsWhatFramesDoNotCarry(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := mux.NewCmux()
+	sig, err := mux.Watch(d, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake.AddWorkspace("pr-2", "W2")
+	fake.AddStatus("W2", "claude", "working")
+	fake.PushEvent("workspace.created", "workspace", map[string]any{"workspace_id": "W2"})
+	waitSignal(t, sig)
+	waitFor(t, func() bool {
+		got, _ := d.States()
+		_, ok := got["pr-2"]
+		return ok
+	}, "the new workspace to land")
+	got, _ := d.States()
+	if got["pr-2"] != "" {
+		t.Errorf("pr-2 = %q; the list was re-read, the pills were not asked for", got["pr-2"])
+	}
+
+	// A notification event is the one thing that turns done into idle.
+	fake.AddStatus("W1", "claude", "done")
+	fake.AddNote("W1", false)
+	fake.PushEvent("notification.created", "notification", map[string]any{})
+	fake.PushStatus("W1", "claude", "done")
+	waitFor(t, func() bool {
+		g, _ := d.States()
+		return g["pr-1"] == mux.Done
+	}, "done to land")
+	fake.Edit(func(st *muxtest.FakeCmuxState) {
+		for i := range st.Notifications {
+			st.Notifications[i].Read = true
+		}
+	})
+	fake.PushEvent("notification.read", "notification", map[string]any{})
+	waitFor(t, func() bool {
+		g, _ := d.States()
+		return g["pr-1"] == mux.Idle
+	}, "the note to read as seen")
+}
+
+// TestCmuxWatchRereadsAfterAGap: a resume gap, a restarted cmux and a
+// dropped stream all mean the same thing — what happened in between is
+// unknown — so each is followed by reading everything again.
+func TestCmuxWatchRereadsAfterAGap(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	fake.AddStatus("W1", "claude", "working")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := mux.NewCmux()
+	sig, err := mux.Watch(d, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.States(); got["pr-1"] != mux.Working {
+		t.Fatalf("pr-1 = %q at the start", got["pr-1"])
+	}
+
+	// Changed behind the driver's back, and only a frame it cannot
+	// trust to be complete announces it.
+	fake.Edit(func(st *muxtest.FakeCmuxState) { st.Statuses["W1"] = nil })
+	fake.AddStatus("W1", "claude", "blocked")
+	fake.PushFrame(map[string]any{"type": "event", "boot_id": "BOOT-2", "name": "workspace.renamed", "category": "workspace", "payload": map[string]any{}})
+	waitSignal(t, sig)
+	waitFor(t, func() bool {
+		g, _ := d.States()
+		return g["pr-1"] == mux.Blocked
+	}, "the re-read after a new boot id")
+
+	// The subscription drops. The driver opens another and reads again.
+	streams := fake.Streams()
+	fake.Edit(func(st *muxtest.FakeCmuxState) { st.Statuses["W1"] = nil })
+	fake.AddStatus("W1", "claude", "idle")
+	fake.SetEvents("BOOT-2", true) // the next ack reports a gap too
+	fake.EndStream()
+	waitFor(t, func() bool { return fake.Streams() > streams }, "the stream to open again")
+	waitFor(t, func() bool {
+		g, _ := d.States()
+		return g["pr-1"] == mux.Idle
+	}, "the re-read after the drop")
+}
+
+// TestCmuxWatchClosesWithTheContext: the channel a caller selects on
+// must end when the caller ends, or its loop never does.
+func TestCmuxWatchClosesWithTheContext(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d := mux.NewCmux()
+	sig, err := mux.Watch(d, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		select {
+		case _, ok := <-sig:
+			if !ok {
+				return // closed, as it should be
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the channel stayed open after the context ended")
+		}
+	}
+}
+
+// TestWatchIsOptional: tmux and herdr have no stream, and a caller
+// keeps its timer for them without asking which driver it holds.
+func TestWatchIsOptional(t *testing.T) {
+	ctx := context.Background()
+	for _, d := range []mux.Driver{mux.Tmux{}, mux.NewHerdr("/x/herdr.sock")} {
+		sig, err := mux.Watch(d, ctx)
+		if err != nil || sig != nil {
+			t.Errorf("%s: Watch = %v, %v; want nil, nil", d.Kind(), sig, err)
+		}
+	}
+	if _, err := mux.Watch(mux.Cmux{}, ctx); err == nil {
+		t.Error("the zero cmux has nowhere to keep a view; Watch should say so")
+	}
+}
+
+// TestCmuxStatesWithoutAWatchStillReads: the unwatched driver is
+// unchanged — a pill per workspace, every time it is asked.
+func TestCmuxStatesWithoutAWatchStillReads(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	for i, name := range []string{"pr-1", "pr-2", "pr-3"} {
+		fake.AddWorkspace(name, "W"+string(rune('1'+i)))
+	}
+	fake.AddStatus("W1", "claude", "working")
+
+	d := mux.NewCmux()
+	before := countCalls(fake.Calls(), "list-status ")
+	if _, err := d.States(); err != nil {
+		t.Fatal(err)
+	}
+	if n, workspaces := countCalls(fake.Calls(), "list-status ")-before, len(fake.State().Workspaces); n != workspaces {
+		t.Errorf("an unwatched States() ran %d list-status calls for %d workspaces", n, workspaces)
+	}
+	if n := countCalls(fake.Calls(), "events"); n != 0 {
+		t.Errorf("an unwatched driver opened %d streams, want none", n)
 	}
 }
