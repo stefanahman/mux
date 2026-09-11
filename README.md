@@ -44,6 +44,7 @@ review session, `pr-reviews` with a `scratch` keepalive window; set
 | `Focus` | `switch-client` | nothing: every client follows `Select` | `focus-window`, from outside cmux |
 | `Notify` | the status line, eight seconds; nothing outside tmux | a herdr notification | a cmux notification |
 | grouping (`mux.Group`) | — the session already is the container | — no grouping in its API | a collapsible sidebar group, anchored on its first member |
+| watching (`mux.Watch`) | — nothing to listen to | — its stream is not read yet | `cmux events` over the socket: `States` then costs nothing |
 | transport | the `tmux` command | the session's socket, newline JSON | the `cmux` command |
 
 `Group` is a capability, not a Driver verb: `mux.Group(d, name, ws,
@@ -65,6 +66,30 @@ real members. That close only fires on the shape a fresh create leaves,
 a group of exactly the caller's workspace and one other; anything else
 keeps its generated anchor, because an untidy sidebar is recoverable
 and a closed workspace is not.
+
+`Watch` is the other capability. `mux.Watch(d, ctx)` returns a channel
+that signals whenever a later `States()` would answer differently, and
+`nil` for a driver without a stream — a nil channel blocks forever in a
+select, so a caller can keep a timer beside it and never branch on
+`Kind`. Only `Cmux` implements `Watcher`.
+
+It exists because asking cmux was expensive. cmux has no bulk read for
+sidebar pills, so `States()` runs one `list-status` per workspace: 36
+processes per refresh on a machine with 36 workspaces, and a caller
+refreshing every two seconds pays that over and over. cmux publishes an
+event stream instead (its `docs/events.md`), and while a watch is live
+`States()` answers from what the stream has told the driver, running
+nothing.
+
+The pills come from the frames: `set_status` and `clear_status` are the
+only writers, so applying them is exact. The workspace list, the hook
+store and the notifications do not travel in their events — those say
+only that something changed — so each is re-read when its own category
+appears, after a burst has settled. A resume gap, a changed `boot_id`, a
+subscription dropped for falling behind and a dead CLI all mean the
+same thing: read everything again. The reconnect is the driver's own
+rather than `cmux events --reconnect`, because a drop is exactly when
+the view may have missed something.
 
 `States` speaks four words: `working`, `blocked` (a permission or a
 question waits), `done` (finished, not yet looked at), `idle`; `""` is
