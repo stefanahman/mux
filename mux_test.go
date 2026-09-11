@@ -1098,6 +1098,69 @@ func TestWatchIsOptional(t *testing.T) {
 	}
 }
 
+// TestCmuxSocketAimsEveryCall: with several cmux apps running, one
+// socket is the only thing that says which of them a call reaches —
+// the CLI's default finds whichever owns the usual path. A driver
+// given one must put it on every call it makes, the watch's own
+// children included, or a watched driver quietly reads the other app.
+func TestCmuxSocketAimsEveryCall(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	const socket = "/tmp/cmux-nightly.sock"
+
+	d := mux.NewCmuxAt(socket)
+	if _, err := d.Workspaces(); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range fake.Calls() {
+		if !strings.HasSuffix(call, " @"+socket) {
+			t.Errorf("call %q did not carry the socket", call)
+		}
+	}
+
+	// The watch reads on drivers of its own making, and streams from a
+	// child process started in a goroutine: all of them have to be
+	// aimed the same way.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := mux.Watch(d, ctx); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().After
+	for start := time.Now(); !deadline(start.Add(5 * time.Second)); {
+		if slices.ContainsFunc(fake.Calls(), func(c string) bool { return strings.HasPrefix(c, "events ") }) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	calls := fake.Calls()
+	if !slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "events ") }) {
+		t.Fatal("the watch never started an events child")
+	}
+	for _, call := range calls {
+		if !strings.HasSuffix(call, " @"+socket) {
+			t.Errorf("call %q did not carry the socket", call)
+		}
+	}
+}
+
+// TestCmuxWithoutASocketKeepsTheCLIDefault: a driver with no socket
+// says nothing about one, so the CLI finds an app the way it does for
+// any caller with no opinion. That is what a process inside cmux
+// wants: the app has already put its own socket in the environment.
+func TestCmuxWithoutASocketKeepsTheCLIDefault(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("pr-1", "W1")
+	if _, err := mux.NewCmux().Workspaces(); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range fake.Calls() {
+		if strings.Contains(call, " @") {
+			t.Errorf("a driver with no socket aimed a call: %q", call)
+		}
+	}
+}
+
 // TestSelfCloseIsTheLineThatEndsAWorkspace: every driver answers, and
 // the answer differs because the multiplexers do. tmux and herdr drop
 // a workspace whose shell is gone, so leaving it is the whole job;

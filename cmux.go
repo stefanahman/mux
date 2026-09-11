@@ -26,10 +26,23 @@ import (
 // three cmux commands and kept until the driver changes something.
 // NewCmux keeps the snapshot across calls; the zero value takes a
 // fresh one for every call, right but slow.
-type Cmux struct{ cache *cmuxSnapshot }
+type Cmux struct {
+	// Socket is the app to talk to, for a machine running more than
+	// one: a nightly build beside a stable one binds its own socket
+	// and holds its own workspaces, and the CLI's default reaches
+	// whichever owns ~/.local/state/cmux/cmux.sock. "" leaves that
+	// default alone, which is right inside a cmux terminal — the app
+	// puts its own socket in the environment the CLI inherits.
+	Socket string
+
+	cache *cmuxSnapshot
+}
 
 // NewCmux returns a driver that reads cmux once per run.
 func NewCmux() Cmux { return Cmux{cache: &cmuxSnapshot{}} }
+
+// NewCmuxAt is NewCmux against one particular app's socket.
+func NewCmuxAt(socket string) Cmux { return Cmux{Socket: socket, cache: &cmuxSnapshot{}} }
 
 // cmuxSnapshot is what the driver has read of cmux so far.
 type cmuxSnapshot struct {
@@ -74,10 +87,20 @@ func (c Cmux) watcher() *cmuxWatch {
 
 // run runs one cmux command and returns trimmed stdout. CMUX_QUIET
 // silences the notices cmux prints for its older verb names.
-func (Cmux) run(args ...string) (string, error) {
+func (c Cmux) run(args ...string) (string, error) {
 	cmd := exec.Command("cmux", args...)
 	cmd.Env = append(os.Environ(), "CMUX_QUIET=1")
+	cmd.Env = append(cmd.Env, c.socketEnv()...)
 	return runOut(cmd)
+}
+
+// socketEnv aims the CLI at this driver's app, or says nothing and
+// lets the CLI find one the way it does for a caller with no opinion.
+func (c Cmux) socketEnv() []string {
+	if c.Socket == "" {
+		return nil
+	}
+	return []string{"CMUX_SOCKET_PATH=" + c.Socket}
 }
 
 // runJSON runs a command with --json, ids and refs both, into v.

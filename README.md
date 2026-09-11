@@ -46,7 +46,7 @@ review session, `pr-reviews` with a `scratch` keepalive window; set
 | ending it from inside (`SelfClose`) | `exit`: a window goes with its last pane's process, `remain-on-exit` being off | `exit`: a workspace goes with its last pane's shell | `cmux workspace close`: the shell outlives the command by design, so the workspace has to be told |
 | grouping (`mux.Group`) | — the session already is the container | — no grouping in its API | a collapsible sidebar group, anchored on its first member |
 | watching (`mux.Watch`) | — nothing to listen to | — its stream is not read yet | `cmux events` over the socket: `States` then costs nothing |
-| transport | the `tmux` command | the session's socket, newline JSON | the `cmux` command |
+| transport | the `tmux` command | the session's socket, newline JSON | the `cmux` command, at `Socket` when the driver names one |
 
 `Group` is a capability, not a Driver verb: `mux.Group(d, name, ws,
 style)` puts a workspace in a named group where the multiplexer has

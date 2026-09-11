@@ -55,6 +55,7 @@ const cmuxRetry = time.Second
 // cmuxWatch is a live subscription and the view it keeps.
 type cmuxWatch struct {
 	mu     sync.Mutex
+	socket string // the app this watch follows; "" is the CLI's own default
 	view   cmuxView
 	dirty  cmuxStale
 	closed bool
@@ -75,11 +76,11 @@ func (c Cmux) Watch(ctx context.Context) (<-chan struct{}, error) {
 	if c.cache.watch != nil {
 		return nil, errors.New("cmux: already watching")
 	}
-	view, err := readCmuxView()
+	view, err := readCmuxView(c.Socket)
 	if err != nil {
 		return nil, err
 	}
-	w := &cmuxWatch{view: view, sig: make(chan struct{}, 1), wake: make(chan struct{}, 1)}
+	w := &cmuxWatch{view: view, socket: c.Socket, sig: make(chan struct{}, 1), wake: make(chan struct{}, 1)}
 	c.cache.watch = w
 	go w.read(ctx)
 	go w.refresh(ctx)
@@ -89,8 +90,8 @@ func (c Cmux) Watch(ctx context.Context) (<-chan struct{}, error) {
 // readCmuxView reads the four things States() needs. It runs on its own
 // driver, never the caller's: the watch reads from another goroutine,
 // and two goroutines must not share one snapshot.
-func readCmuxView() (cmuxView, error) {
-	d := NewCmux()
+func readCmuxView(socket string) (cmuxView, error) {
+	d := NewCmuxAt(socket)
 	list, err := d.list()
 	if err != nil {
 		return cmuxView{}, err
@@ -202,6 +203,7 @@ func (w *cmuxWatch) stream(ctx context.Context) {
 		"--category", "notification",
 		"--category", "agent")
 	cmd.Env = append(cmd.Environ(), "CMUX_QUIET=1")
+	cmd.Env = append(cmd.Env, Cmux{Socket: w.socket}.socketEnv()...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return
@@ -344,7 +346,7 @@ func (w *cmuxWatch) reread() {
 		return
 	}
 
-	d := NewCmux()
+	d := NewCmuxAt(w.socket)
 	var list *cmuxList
 	var pills map[string]string
 	if dirty&(cmuxStaleList|cmuxStalePills) != 0 {

@@ -162,6 +162,18 @@ func lockFakeCmux() (unlock func()) {
 //		}
 //		os.Exit(m.Run())
 //	}
+//
+// callOf is what a call is recorded as: its arguments, and — when the
+// driver aimed the CLI at one particular app — the socket it was aimed
+// at, so a test can tell which cmux a call would have reached.
+func callOf(args []string) string {
+	line := strings.Join(args, " ")
+	if sock := os.Getenv("CMUX_SOCKET_PATH"); sock != "" {
+		line += " @" + sock
+	}
+	return line
+}
+
 func FakeCmuxMain(args []string) int {
 	// `events` is the one verb that does not return: it streams until
 	// the test ends it. It records its call, drops the lock, and then
@@ -170,7 +182,7 @@ func FakeCmuxMain(args []string) int {
 	if len(args) > 0 && args[0] == "events" {
 		unlock := lockFakeCmux()
 		st := loadFakeCmux()
-		st.Calls = append(st.Calls, strings.Join(args, " "))
+		st.Calls = append(st.Calls, callOf(args))
 		saveFakeCmux(st)
 		boot, gap := st.EventsBootID, st.EventsGap
 		unlock()
@@ -178,7 +190,7 @@ func FakeCmuxMain(args []string) int {
 	}
 	defer lockFakeCmux()()
 	st := loadFakeCmux()
-	st.Calls = append(st.Calls, strings.Join(args, " "))
+	st.Calls = append(st.Calls, callOf(args))
 	defer func() { saveFakeCmux(st) }()
 
 	// Global presentation flags first, then the verb, then --opt value
@@ -653,6 +665,11 @@ func InstallFakeCmux(t *testing.T) *FakeCmux {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(FakeCmuxEnv, dir)
+	// A cmux terminal exports the socket of the app it belongs to, and
+	// the tests run in one: cleared, so that a call recorded with a
+	// socket is one the driver aimed, not one the developer's terminal
+	// handed down.
+	t.Setenv("CMUX_SOCKET_PATH", "")
 	t.Setenv("CMUX_WORKSPACE_ID", "")
 	t.Setenv("CMUX_SURFACE_ID", "")
 	t.Setenv("HERDR_ENV", "")
