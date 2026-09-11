@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // FakeCmuxEnv names the directory the fake keeps its state in; set by
@@ -33,6 +34,8 @@ type FakeCmuxState struct {
 	CaptureOnCreate []string // workspace ids create also pulls into the group
 	Selected        string   // workspace id
 	Focused         string   // window ref
+	EventsBootID    string   // boot_id the ack and the fake's own frames carry
+	EventsGap       bool     // the ack reports a resume gap: replay was lost
 }
 
 // FakeCmuxWorkspace mirrors a `workspace list` record.
@@ -160,6 +163,19 @@ func lockFakeCmux() (unlock func()) {
 //		os.Exit(m.Run())
 //	}
 func FakeCmuxMain(args []string) int {
+	// `events` is the one verb that does not return: it streams until
+	// the test ends it. It records its call, drops the lock, and then
+	// serves — holding the lock for the life of a stream would block
+	// every other call the driver makes.
+	if len(args) > 0 && args[0] == "events" {
+		unlock := lockFakeCmux()
+		st := loadFakeCmux()
+		st.Calls = append(st.Calls, strings.Join(args, " "))
+		saveFakeCmux(st)
+		boot, gap := st.EventsBootID, st.EventsGap
+		unlock()
+		return fakeCmuxEvents(boot, gap)
+	}
 	defer lockFakeCmux()()
 	st := loadFakeCmux()
 	st.Calls = append(st.Calls, strings.Join(args, " "))
@@ -560,10 +576,58 @@ func FakeCmuxMain(args []string) int {
 	return 0
 }
 
+// fakeCmuxEventsPath is the queue the test pushes frames onto; the
+// cursor beside it is how many lines a stream has already served, so a
+// reconnect continues where the last one stopped rather than replaying.
+func fakeCmuxEventsPath() string { return filepath.Join(os.Getenv(FakeCmuxEnv), "events.ndjson") }
+func fakeCmuxCursorPath() string { return filepath.Join(os.Getenv(FakeCmuxEnv), "events.cursor") }
+
+// fakeCmuxEndFrame is the sentinel that ends a stream: the test's way
+// of saying the subscription dropped or cmux went away.
+const fakeCmuxEndFrame = `{"__muxtest":"end"}`
+
+// fakeCmuxEvents serves `cmux events`: the ack cmux sends on
+// subscribing, then every frame the test pushes, until the sentinel or
+// the process is killed.
+func fakeCmuxEvents(boot string, gap bool) int {
+	if boot == "" {
+		boot = "BOOT-1"
+	}
+	fmt.Printf(`{"type":"ack","protocol":"cmux-events","version":1,"boot_id":%q,"subscription_id":"SUB-1","resume":{"gap":%t,"latest_seq":1,"next_seq":2}}`+"\n", boot, gap)
+	os.Stdout.Sync()
+	for {
+		served := 0
+		if b, err := os.ReadFile(fakeCmuxCursorPath()); err == nil {
+			fmt.Sscanf(string(b), "%d", &served)
+		}
+		lines := []string{}
+		if b, err := os.ReadFile(fakeCmuxEventsPath()); err == nil {
+			for _, l := range strings.Split(string(b), "\n") {
+				if strings.TrimSpace(l) != "" {
+					lines = append(lines, l)
+				}
+			}
+		}
+		if served < len(lines) {
+			line := lines[served]
+			_ = os.WriteFile(fakeCmuxCursorPath(), []byte(fmt.Sprint(served+1)), 0o644)
+			if strings.Contains(line, `"__muxtest":"end"`) {
+				return 0
+			}
+			fmt.Println(line)
+			os.Stdout.Sync()
+			continue
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // FakeCmux seeds and reads the fake's state from the test side.
 type FakeCmux struct {
-	t   *testing.T
-	dir string
+	t        *testing.T
+	dir      string
+	eventSeq int
+	boot     string
 }
 
 // InstallFakeCmux puts the fake first on PATH — a symlink named cmux to
@@ -745,4 +809,87 @@ func (f *FakeCmux) writePS() {
 		}
 	}
 	_ = os.WriteFile(filepath.Join(f.dir, "ps.txt"), []byte(b.String()), 0o644)
+}
+
+// PushFrame queues a raw frame for the stream to print next.
+func (f *FakeCmux) PushFrame(frame any) {
+	data, err := json.Marshal(frame)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	fh, err := os.OpenFile(fakeCmuxEventsPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer fh.Close()
+	if _, err := fh.Write(append(data, '\n')); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// PushEvent queues an event frame, the shape docs/events.md prints.
+func (f *FakeCmux) PushEvent(name, category string, payload map[string]any) {
+	f.eventSeq++
+	f.PushFrame(map[string]any{
+		"type": "event", "protocol": "cmux-events", "version": 1,
+		"boot_id": f.bootID(), "seq": f.eventSeq,
+		"id":   fmt.Sprintf("%s-%d", f.bootID(), f.eventSeq),
+		"name": name, "category": category, "source": "muxtest",
+		"occurred_at": "2026-09-11T09:00:00.000Z",
+		"payload":     payload,
+	})
+}
+
+// PushStatus queues the event cmux emits when a sidebar pill is set:
+// the workspace is not in workspace_id but inside the recorded command
+// line, and the value is unquoted, so cmux's own `claude_code Needs
+// input …` carries a space.
+func (f *FakeCmux) PushStatus(workspaceID, key, value string) {
+	args := fmt.Sprintf("%s %s --tab=%s --icon bolt.fill --color '#dbbc7f' --priority 90", key, value, workspaceID)
+	f.PushEvent("sidebar.metadata.updated", "sidebar", map[string]any{"command": "set_status", "args": args})
+}
+
+// PushStatusCleared queues the event for a pill removed.
+func (f *FakeCmux) PushStatusCleared(workspaceID, key string) {
+	args := fmt.Sprintf("%s --tab=%s", key, workspaceID)
+	f.PushEvent("sidebar.metadata.cleared", "sidebar", map[string]any{"command": "clear_status", "args": args})
+}
+
+// PushHeartbeat queues the keep-alive cmux sends every 15 s.
+func (f *FakeCmux) PushHeartbeat() {
+	f.PushFrame(map[string]any{"type": "heartbeat", "protocol": "cmux-events", "version": 1, "boot_id": f.bootID(), "subscription_id": "SUB-1", "latest_seq": f.eventSeq})
+}
+
+// EndStream ends the current stream where it stands: what a dropped
+// subscription or a cmux that went away looks like from outside.
+func (f *FakeCmux) EndStream() {
+	f.PushFrame(map[string]any{"__muxtest": "end"})
+}
+
+// SetEvents decides what the next stream's ack says: which boot it
+// belongs to, and whether the replay it would have resumed from is
+// gone. A different boot id is cmux restarted.
+func (f *FakeCmux) SetEvents(bootID string, gap bool) {
+	f.boot = bootID
+	f.Edit(func(st *FakeCmuxState) { st.EventsBootID, st.EventsGap = bootID, gap })
+}
+
+// bootID is what the fake stamps on the frames it queues.
+func (f *FakeCmux) bootID() string {
+	if f.boot == "" {
+		return "BOOT-1"
+	}
+	return f.boot
+}
+
+// Streams counts the `events` subscriptions opened so far, so a test
+// can wait for a reconnect.
+func (f *FakeCmux) Streams() int {
+	n := 0
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c, "events") {
+			n++
+		}
+	}
+	return n
 }
