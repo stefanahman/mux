@@ -168,6 +168,13 @@ type Driver interface {
 	Focus() error
 	// Close removes the workspace.
 	Close(ws Workspace) error
+	// SelfClose is a shell command that ends ws when it runs inside
+	// ws. Appended to a workspace's command line, it makes the
+	// workspace last exactly as long as the program does: `exit` where
+	// the multiplexer already drops a workspace whose shell is gone,
+	// the multiplexer's own close where it does not. Never "": every
+	// multiplexer can end a workspace from inside one way or another.
+	SelfClose(ws Workspace) string
 	// Current is the workspace this process runs in, if any.
 	Current() (Workspace, bool)
 	// Describe names a workspace the way the user sees it.

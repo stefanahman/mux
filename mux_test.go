@@ -1098,6 +1098,67 @@ func TestWatchIsOptional(t *testing.T) {
 	}
 }
 
+// TestSelfCloseIsTheLineThatEndsAWorkspace: every driver answers, and
+// the answer differs because the multiplexers do. tmux and herdr drop
+// a workspace whose shell is gone, so leaving it is the whole job;
+// cmux keeps the shell alive after the command and has to be told.
+func TestSelfCloseIsTheLineThatEndsAWorkspace(t *testing.T) {
+	for _, d := range []mux.Driver{mux.Tmux{}, mux.NewHerdr("/x/herdr.sock")} {
+		if got := d.SelfClose(mux.Workspace{ID: "w1"}); got != "exit" {
+			t.Errorf("%s: SelfClose = %q, want %q", d.Kind(), got, "exit")
+		}
+	}
+	got := mux.Cmux{}.SelfClose(mux.Workspace{ID: "W1"})
+	if want := "cmux workspace close --workspace 'W1'"; got != want {
+		t.Errorf("cmux: SelfClose = %q, want %q", got, want)
+	}
+	// An id is the multiplexer's word, not ours, but it ends up in a
+	// shell line: it stays one word whatever is in it.
+	got = mux.Cmux{}.SelfClose(mux.Workspace{ID: "W1'; rm -rf /tmp/x; '"})
+	if want := `cmux workspace close --workspace 'W1'\''; rm -rf /tmp/x; '\'''`; got != want {
+		t.Errorf("cmux: SelfClose(hostile id) = %q, want %q", got, want)
+	}
+}
+
+// TestTmuxSelfCloseRunsAndTheWindowIsGone: the line is not just the
+// right words — running it in the workspace ends the workspace.
+func TestTmuxSelfCloseRunsAndTheWindowIsGone(t *testing.T) {
+	muxtest.StartTmux(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := mux.Tmux{SessionName: "reviews", Keepalive: "keep"}
+	if err := d.Prepare(root); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := d.Create("pr-1-fix", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane, err := d.AgentPane(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Run(ws, pane, d.SelfClose(ws)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		list, err := d.Workspaces()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the window outlived its shell: %+v", list)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestCmuxStatesWithoutAWatchStillReads: the unwatched driver is
 // unchanged — a pill per workspace, every time it is asked.
 func TestCmuxStatesWithoutAWatchStillReads(t *testing.T) {

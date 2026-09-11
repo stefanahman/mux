@@ -390,6 +390,12 @@ func (h Herdr) Close(ws Workspace) error {
 	return err
 }
 
+// SelfClose: herdr drops a workspace when the last pane's shell ends,
+// the same way tmux does — verified against a live 0.9.0 server, whose
+// workspace.list stopped reporting a probe workspace three seconds
+// after its shell was sent `exit`.
+func (Herdr) SelfClose(Workspace) string { return "exit" }
+
 // Current is the workspace of the pane this process runs in, which
 // herdr names in the environment.
 func (h Herdr) Current() (Workspace, bool) {

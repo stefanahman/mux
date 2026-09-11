@@ -254,6 +254,11 @@ func (Tmux) Close(ws Workspace) error {
 	return err
 }
 
+// SelfClose: tmux kills a pane whose process ends, and a window with
+// its last pane, unless remain-on-exit is set — off by default, and
+// nothing here sets it. So leaving the shell is enough.
+func (Tmux) SelfClose(Workspace) string { return "exit" }
+
 // Current is the window this process runs in, when that is one of the
 // session's.
 func (t Tmux) Current() (Workspace, bool) {

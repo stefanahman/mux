@@ -892,6 +892,23 @@ func (c Cmux) Close(ws Workspace) error {
 	return err
 }
 
+// SelfClose: cmux keeps the workspace when the command ends. Its
+// --command "delivers the text plus one Enter at spawn time, so the
+// command runs immediately and the shell stays alive after it exits"
+// (cmux's own skill doc), and a layout surface behaves the same way —
+// a workspace whose only surface ran `sleep 4` was still listed long
+// after. So the workspace has to be told to go.
+func (Cmux) SelfClose(ws Workspace) string {
+	return "cmux workspace close --workspace " + shellArg(ws.ID)
+}
+
+// shellArg is s as one single-quoted shell word, so that a workspace
+// id the multiplexer invented cannot end the quoting and run as a
+// command of its own.
+func shellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // Current is the workspace of the terminal this process runs in.
 func (c Cmux) Current() (Workspace, bool) {
 	id := os.Getenv("CMUX_WORKSPACE_ID")
