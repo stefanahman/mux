@@ -1169,6 +1169,48 @@ func TestCmuxWithoutASocketKeepsTheCLIDefault(t *testing.T) {
 	}
 }
 
+// TestCmuxCreateWaitsForTheWorkspaceToAppear: cmux answers a create
+// as soon as the app has taken it — `OK workspace:25` — and a list in
+// the same breath does not have the workspace yet. Reading once made
+// Create fail on an open that had in fact worked, leaving the caller
+// with an orphan: the workspace was there, its command never typed.
+func TestCmuxCreateWaitsForTheWorkspaceToAppear(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("", "HOME")
+	fake.CreateLag(3) // three lists answer without it, as cmux does
+
+	d := mux.NewCmux()
+	ws, err := d.Create("projects", t.TempDir())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if ws.Name != "projects" || ws.ID == "" {
+		t.Errorf("Create returned %+v", ws)
+	}
+	// And the workspace it returns is usable: the caller types into it
+	// straight away, which is the whole point of waiting.
+	panes, err := d.Panes(ws)
+	if err != nil || len(panes) == 0 {
+		t.Fatalf("Panes(%q) = %v, %v", ws.Name, panes, err)
+	}
+	if err := d.Run(ws, panes[0], "owl project"); err != nil {
+		t.Errorf("Run: %v", err)
+	}
+}
+
+// TestCmuxCreateGivesUpSaying so: a workspace that never appears is an
+// error naming the wait, not a silent empty workspace.
+func TestCmuxCreateGivesUpSayingSo(t *testing.T) {
+	fake := muxtest.InstallFakeCmux(t)
+	fake.AddWorkspace("", "HOME")
+	fake.CreateLag(1 << 30)
+
+	_, err := mux.NewCmux().Create("projects", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "not in the list") {
+		t.Errorf("Create = %v, want an error about the list", err)
+	}
+}
+
 // TestSelfCloseIsTheLineThatEndsAWorkspace: every driver answers, and
 // the answer differs because the multiplexers do. tmux and herdr drop
 // a workspace whose shell is gone, so leaving it is the whole job;

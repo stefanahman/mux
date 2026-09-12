@@ -29,17 +29,20 @@ type FakeCmuxState struct {
 	PS              FakePS                      // tty → foreground commands
 	Typed           map[string][]string         // surface id → text and keys, in order
 	Calls           []string
-	Rejects         []string // verbs the fake fails, for the caller's error paths
-	AnchorsOnGiven  bool     // create anchors on the workspace it was given, generating none
-	CaptureOnCreate []string // workspace ids create also pulls into the group
-	Selected        string   // workspace id
-	Focused         string   // window ref
-	EventsBootID    string   // boot_id the ack and the fake's own frames carry
-	EventsGap       bool     // the ack reports a resume gap: replay was lost
+	Rejects         []string       // verbs the fake fails, for the caller's error paths
+	AnchorsOnGiven  bool           // create anchors on the workspace it was given, generating none
+	CaptureOnCreate []string       // workspace ids create also pulls into the group
+	Selected        string         // workspace id
+	Focused         string         // window ref
+	CreateLag       int            // list calls a created workspace stays invisible for, as cmux's own create is asynchronous
+	Hidden          map[string]int // workspace ref → list calls it is still invisible for
+	EventsBootID    string         // boot_id the ack and the fake's own frames carry
+	EventsGap       bool           // the ack reports a resume gap: replay was lost
 }
 
 // FakeCmuxWorkspace mirrors a `workspace list` record.
 type FakeCmuxWorkspace struct {
+	HideFor     int    `json:"-"` // list calls left before this workspace is reported
 	ID          string `json:"id"`
 	Ref         string `json:"ref"`
 	Title       string `json:"title"`
@@ -295,13 +298,30 @@ func FakeCmuxMain(args []string) int {
 		}
 		return out(map[string]any{"windows": []map[string]any{{"ref": "window:1", "workspaces": wss}}})
 	case verb == "workspace list":
-		return out(map[string]any{"window_ref": "window:1", "workspaces": st.Workspaces})
+		// cmux answers a create before its list shows the workspace;
+		// CreateLag reproduces that, one list call at a time.
+		shown := make([]FakeCmuxWorkspace, 0, len(st.Workspaces))
+		for _, w := range st.Workspaces {
+			if left := st.Hidden[w.Ref]; left > 0 {
+				st.Hidden[w.Ref] = left - 1
+				continue
+			}
+			shown = append(shown, w)
+		}
+		saveFakeCmux(st)
+		return out(map[string]any{"window_ref": "window:1", "workspaces": shown})
 	case verb == "workspace create":
 		st.Next++
 		w := FakeCmuxWorkspace{ID: fmt.Sprintf("WS-%d", st.Next), Ref: fmt.Sprintf("workspace:%d", st.Next), Title: opts["--name"], CustomTitle: opts["--name"], HasCustom: opts["--name"] != "", Cwd: opts["--cwd"]}
 		root := newSurface(w.name())
 		root.TTY = fmt.Sprintf("ttys%03d", st.Next)
 		w.Panes = []FakeCmuxPane{{Ref: fmt.Sprintf("pane:%d", st.Next), Surfaces: []FakeCmuxSurface{root}}}
+		if st.CreateLag > 0 {
+			if st.Hidden == nil {
+				st.Hidden = map[string]int{}
+			}
+			st.Hidden[w.Ref] = st.CreateLag
+		}
 		st.Workspaces = append(st.Workspaces, w)
 		fmt.Println("OK " + w.Ref)
 	case verb == "workspace select", verb == "workspace close", verb == "mark-notification-read", verb == "list-panes", verb == "list-pane-surfaces", verb == "new-surface", verb == "list-status",
@@ -782,6 +802,13 @@ func (f *FakeCmux) CaptureOnCreate(workspaceIDs ...string) {
 // tested against a cmux that refuses.
 func (f *FakeCmux) Reject(verbs ...string) {
 	f.Edit(func(st *FakeCmuxState) { st.Rejects = append(st.Rejects, verbs...) })
+}
+
+// CreateLag makes a created workspace invisible to the next n
+// `workspace list` calls, the way cmux answers a create before its own
+// list has it.
+func (f *FakeCmux) CreateLag(n int) {
+	f.Edit(func(st *FakeCmuxState) { st.CreateLag = n })
 }
 
 // AddNote seeds a notification.

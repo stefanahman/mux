@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Cmux drives the cmux application through its CLI. Handles are
@@ -101,6 +102,32 @@ func (c Cmux) socketEnv() []string {
 		return nil
 	}
 	return []string{"CMUX_SOCKET_PATH=" + c.Socket}
+}
+
+// cmuxAppear is how long a write is given to show up in cmux's own
+// answers. The CLI replies when the app has accepted the command, not
+// when its list, tree and sidebar show the result: `workspace create`
+// says OK workspace:25 and a list taken in the same breath does not
+// have it yet. The wait is generous because losing the race means
+// failing an open, and the loop ends the moment the thing appears.
+const cmuxAppear = 5 * time.Second
+
+// settle re-reads until find reports what a write just made, or the
+// wait runs out. Each turn forgets the snapshot: a kept driver would
+// otherwise answer every turn from the read taken before the write.
+func (c Cmux) settle(find func() (bool, error)) (bool, error) {
+	deadline := time.Now().Add(cmuxAppear)
+	for {
+		c.changed()
+		found, err := find()
+		if err != nil || found {
+			return found, err
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // runJSON runs a command with --json, ids and refs both, into v.
@@ -292,16 +319,27 @@ func (c Cmux) Create(name, cwd string) (Workspace, error) {
 	if ref == "" {
 		return Workspace{}, fmt.Errorf("cmux workspace create: no workspace in the answer %q", out)
 	}
-	r, err := c.list()
+	var made Workspace
+	found, err := c.settle(func() (bool, error) {
+		r, err := c.list()
+		if err != nil {
+			return false, err
+		}
+		for _, w := range r.Workspaces {
+			if w.Ref == ref {
+				made = w.workspace()
+				return true, nil
+			}
+		}
+		return false, nil
+	})
 	if err != nil {
 		return Workspace{}, err
 	}
-	for _, w := range r.Workspaces {
-		if w.Ref == ref {
-			return w.workspace(), nil
-		}
+	if !found {
+		return Workspace{}, fmt.Errorf("cmux: created %s, which was not in the list %s later", ref, cmuxAppear)
 	}
-	return Workspace{}, fmt.Errorf("cmux: created %s, but the list has no such workspace", ref)
+	return made, nil
 }
 
 type cmuxPane struct {
@@ -418,18 +456,29 @@ func (c Cmux) AgentPane(ws Workspace) (Pane, error) {
 
 // surfaceByRef finds the UUID of a surface cmux just named by ref.
 func (c Cmux) surfaceByRef(ws Workspace, ref string) (Pane, error) {
-	list, err := c.panes(ws)
+	var pane Pane
+	found, err := c.settle(func() (bool, error) {
+		list, err := c.panes(ws)
+		if err != nil {
+			return false, err
+		}
+		for _, p := range list {
+			for i, r := range p.SurfaceRefs {
+				if r == ref && i < len(p.SurfaceIDs) {
+					pane = Pane{ID: p.SurfaceIDs[i]}
+					return true, nil
+				}
+			}
+		}
+		return false, nil
+	})
 	if err != nil {
 		return Pane{}, err
 	}
-	for _, p := range list {
-		for i, r := range p.SurfaceRefs {
-			if r == ref && i < len(p.SurfaceIDs) {
-				return Pane{ID: p.SurfaceIDs[i]}, nil
-			}
-		}
+	if !found {
+		return Pane{}, fmt.Errorf("cmux: no surface %s in %q", ref, ws.Name)
 	}
-	return Pane{}, fmt.Errorf("cmux: no surface %s in %q", ref, ws.Name)
+	return pane, nil
 }
 
 // AddTab adds a surface to the first pane; cmux has no directory
