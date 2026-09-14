@@ -1,7 +1,7 @@
 // tmux as the multiplexer: one session holds the workspaces as its
 // windows, a keepalive window keeps it alive when there are none, and
 // keystrokes go through send-keys. What the agent is doing comes from
-// tmux-claude-status, which writes Claude Code's hook events to the
+// claude-status, which writes Claude Code's hook events to the
 // @claude-state window option; without the plugin every state is
 // unknown, and everything else still works.
 package mux
@@ -14,13 +14,13 @@ import (
 	"strings"
 )
 
-// ClaudeStateOption is the tmux window option tmux-claude-status
+// ClaudeStateOption is the tmux window option claude-status
 // writes Claude's state to — the contract between the tools.
 const ClaudeStateOption = "@claude-state"
 
 // Tmux drives a tmux session. The zero value uses the defaults below.
 type Tmux struct {
-	// SessionName holds the workspaces; default "pr-reviews".
+	// SessionName holds the workspaces; default "reviews".
 	SessionName string
 	// Keepalive is the window that keeps the session alive with no
 	// workspaces open; default "scratch". It is never a workspace.
@@ -29,7 +29,7 @@ type Tmux struct {
 
 func (t Tmux) session() string {
 	if t.SessionName == "" {
-		return "pr-reviews"
+		return "reviews"
 	}
 	return t.SessionName
 }

@@ -7,7 +7,7 @@ into, an agent to hand a prompt to, and what the multiplexer knows
 about that agent — with each multiplexer's quirks kept in its own
 file, next to what was verified on the real thing.
 
-[pr-owl](https://github.com/stefanahman/pr-owl) runs its reviews on
+[owl](https://github.com/stefanahman/owl) runs its reviews on
 it; [spaces](https://github.com/stefanahman/spaces) builds work
 contexts inside herdr and cmux with it.
 
@@ -25,8 +25,8 @@ _ = d.Prompt(ws, pane, "look at the new comments")           // the multiplexer'
 ```
 
 `Detect` picks herdr or cmux when the process runs inside one, tmux
-otherwise. `ByKind("cmux")` names one. `Tmux`'s zero value is pr-owl's
-review session, `pr-reviews` with a `scratch` keepalive window; set
+otherwise. `ByKind("cmux")` names one. `Tmux`'s zero value is owl's
+review session, `reviews` with a `scratch` keepalive window; set
 `SessionName` and `Keepalive` for anything else.
 
 ## The model
@@ -37,7 +37,7 @@ review session, `pr-reviews` with a `scratch` keepalive window; set
 | pane | a pane | a pane | a terminal surface |
 | tab (`AddTab`) | — (`ErrUnsupported`) | a tab | a surface in the first pane |
 | `Layout` | the window as one tab | tabs with their panes | the first pane's surfaces as tabs; the other panes, cmux's workspace-wide splits, listed under the first |
-| the agent's state | `@claude-state`, written by [claude-status](https://github.com/stefanahman/claude-status) | herdr's own detection, from the screen | claude-status's pill when the plugin runs there, else cmux's Claude Code hooks (whose needsInput also covers the idle reminder) |
+| the agent's state | `@claude-state`, written by [claude-status](https://github.com/stefanahman/claude-status) | herdr's own detection, from the screen | cmux's own Claude Code hooks; a `claude` sidebar pill still wins where something writes one |
 | `Prompt` | keystrokes | `agent.prompt`, which refuses while the agent is blocked; keystrokes for an agent herdr has not detected | keystrokes |
 | `Processes` | the pane's current command | the pane's foreground processes | `ps` on the surface's tty where cmux knows it; else what the tab's title names |
 | `Inside` | `TMUX` | `HERDR_ENV=1` | `CMUX_WORKSPACE_ID` |
@@ -140,16 +140,19 @@ The hooks are cmux's Claude Code integration, on through
 `automation.claudeCodeIntegration: true` in `~/.config/cmux/cmux.json`.
 Its terminals carry `CMUX_SURFACE_ID`, which its Claude Code wrapper
 checks before injecting the hooks. The state is read from two places.
-First claude-status's sidebar pill, `claude=working|blocked|done|idle`
-(`cmux list-status --workspace <id>`, one call per workspace, run side
-by side: the CLI's start-up is the cost, the same for one as for
-fifteen), which its hooks write from the events that mean those words.
-Without the pill, the hook records from `cmux sessions --agent claude`:
+Normally the hook records from `cmux sessions --agent claude`:
 `running`, `needsInput`, `idle`, kept after the agent exits
-(`stored_pid_exists` tells). Those are the fallback because cmux sets
-`needsInput` on Claude Code's idle reminder too — the notification
-sent 60 seconds after a finished turn — so a session at its prompt
-reads as blocked there once a minute has passed. Either way `done` is
+(`stored_pid_exists` tells). A `claude=working|blocked|done|idle`
+sidebar pill wins over them where one exists (`cmux list-status
+--workspace <id>`, one call per workspace, run side by side: the CLI's
+start-up is the cost, the same for one as for fifteen).
+
+claude-status wrote that pill until its 0.4.0, because cmux used to set
+`needsInput` on Claude Code's idle reminder too — the notification sent
+60 seconds after a finished turn — so a session at its prompt read as
+blocked once a minute had passed. Upstream fixed that, claude-status
+stopped writing, and the hook records are the answer again; the pill is
+read still, for anyone who writes one. Either way `done` is
 done while cmux's notification about the turn is unread; `Seen` marks
 them read (owl calls it when the user arrives), and a visit in cmux
 does the same. cmux knows the tty only of the surface a workspace was
