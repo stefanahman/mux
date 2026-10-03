@@ -325,6 +325,62 @@ func contains(list []string, s string) bool {
 	return false
 }
 
+// TestHerdrMove: Move takes the index a workspace should end up at,
+// and the driver turns a move to the right into herdr's insert_index,
+// which counts from the order before the move.
+func TestHerdrMove(t *testing.T) {
+	fake := muxtest.NewFakeHerdr(t)
+	d := mux.NewHerdr(fake.Socket())
+	ws := map[string]mux.Workspace{}
+	for _, name := range []string{"a", "b", "c", "d"} {
+		w, err := d.Create(name, "/repo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws[name] = w
+	}
+	order := func() string {
+		list, err := d.Workspaces()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, w := range list {
+			names = append(names, w.Name)
+		}
+		return strings.Join(names, "")
+	}
+	for _, c := range []struct {
+		name  string
+		index int
+		want  string
+	}{
+		{"d", 0, "dabc"},  // left
+		{"d", 2, "abdc"},  // right: herdr is asked for 3
+		{"a", 99, "bdca"}, // past the end: last
+		{"c", 2, "bdca"},  // where it is already: nothing sent
+		{"b", -1, "bdca"}, // before the start: first, where it is
+	} {
+		if err := mux.Move(d, ws[c.name], c.index); err != nil {
+			t.Fatalf("Move(%s, %d): %v", c.name, c.index, err)
+		}
+		if got := order(); got != c.want {
+			t.Errorf("Move(%s, %d): order %s, want %s", c.name, c.index, got, c.want)
+		}
+	}
+	if err := mux.Move(d, mux.Workspace{ID: "w99", Name: "gone"}, 0); err == nil {
+		t.Error("moving a workspace herdr does not have succeeded")
+	}
+}
+
+func TestMoveIsOptional(t *testing.T) {
+	for _, d := range []mux.Driver{mux.Tmux{SessionName: "reviews"}, mux.Cmux{}} {
+		if err := mux.Move(d, mux.Workspace{ID: "W1", Name: "pr-1"}, 0); err != nil {
+			t.Errorf("%s: %v", d.Kind(), err)
+		}
+	}
+}
+
 func TestHerdrUnreachable(t *testing.T) {
 	d := mux.NewHerdr("/nonexistent/herdr.sock")
 	if err := d.Ping(); err == nil || !strings.Contains(err.Error(), "herdr") {

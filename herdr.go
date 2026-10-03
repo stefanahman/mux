@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"time"
 )
 
@@ -387,6 +388,30 @@ func (Herdr) Seen(Workspace) error { return nil }
 
 func (h Herdr) Close(ws Workspace) error {
 	_, err := h.call("workspace.close", map[string]any{"workspace_id": ws.ID})
+	return err
+}
+
+// Move: herdr reads workspace.move's insert_index against the order
+// before the move — the workspace lands in front of the one at that
+// index — so a move to the right asks for one past where it should
+// end up. Measured on 0.9.3: w2A at 0 with insert_index 2 landed at 1.
+func (h Herdr) Move(ws Workspace, index int) error {
+	list, err := h.list()
+	if err != nil {
+		return err
+	}
+	from := slices.IndexFunc(list, func(w herdrWorkspace) bool { return w.ID == ws.ID })
+	if from < 0 {
+		return fmt.Errorf("herdr: no workspace %s", ws.ID)
+	}
+	index = max(0, min(index, len(list)-1))
+	if index == from {
+		return nil
+	}
+	if index > from {
+		index++
+	}
+	_, err = h.call("workspace.move", map[string]any{"workspace_id": ws.ID, "insert_index": index})
 	return err
 }
 

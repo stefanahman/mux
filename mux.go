@@ -113,6 +113,26 @@ func Watch(d Driver, ctx context.Context) (<-chan struct{}, error) {
 	return w.Watch(ctx)
 }
 
+// Mover is implemented by drivers that can reorder their workspaces.
+// herdr's API moves one to an index; cmux has `reorder-workspace` but
+// no driver for it yet, and tmux's windows are not workspaces here.
+type Mover interface {
+	// Move puts ws at index in the order Workspaces() lists, 0 first,
+	// counted in the order as it stands after the move. An index past
+	// the end puts it last.
+	Move(ws Workspace, index int) error
+}
+
+// Move reorders a workspace when the driver can, and does nothing when
+// it cannot — the caller does not branch on Kind.
+func Move(d Driver, ws Workspace, index int) error {
+	m, ok := d.(Mover)
+	if !ok {
+		return nil
+	}
+	return m.Move(ws, index)
+}
+
 // Driver is one multiplexer.
 type Driver interface {
 	// Kind names the multiplexer: tmux, herdr, cmux.
