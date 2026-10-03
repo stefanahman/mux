@@ -189,6 +189,7 @@ func (f *FakeHerdr) dispatch(method string, raw json.RawMessage) (any, *herdrErr
 		Cwd, Label, WorkspaceID, PaneID, TargetPaneID, Target, Text, Title, Body, Direction string
 		Focus                                                                               bool
 		Keys                                                                                []string
+		InsertIndex                                                                         int
 	}
 	_ = json.Unmarshal(raw, &struct {
 		Cwd          *string   `json:"cwd"`
@@ -203,7 +204,8 @@ func (f *FakeHerdr) dispatch(method string, raw json.RawMessage) (any, *herdrErr
 		Direction    *string   `json:"direction"`
 		Focus        *bool     `json:"focus"`
 		Keys         *[]string `json:"keys"`
-	}{&p.Cwd, &p.Label, &p.WorkspaceID, &p.PaneID, &p.TargetPaneID, &p.Target, &p.Text, &p.Title, &p.Body, &p.Direction, &p.Focus, &p.Keys})
+		InsertIndex  *int      `json:"insert_index"`
+	}{&p.Cwd, &p.Label, &p.WorkspaceID, &p.PaneID, &p.TargetPaneID, &p.Target, &p.Text, &p.Title, &p.Body, &p.Direction, &p.Focus, &p.Keys, &p.InsertIndex})
 	switch method {
 	case "ping":
 		return map[string]any{"type": "pong"}, nil
@@ -237,6 +239,32 @@ func (f *FakeHerdr) dispatch(method string, raw json.RawMessage) (any, *herdrErr
 			}
 		}
 		return nil, &herdrError{"not_found", "workspace not found"}
+	case "workspace.move":
+		// herdr 0.9.3 reads insert_index against the order before the
+		// move: the workspace lands in front of the one at that index, so
+		// moving w2A from 0 with insert_index 2 left it at 1. It answers
+		// with the whole new order.
+		from := -1
+		for i, w := range f.workspaces {
+			if w.id == p.WorkspaceID {
+				from = i
+			}
+		}
+		if from < 0 {
+			return nil, &herdrError{"not_found", "workspace not found"}
+		}
+		to := min(p.InsertIndex, len(f.workspaces))
+		w := f.workspaces[from]
+		rest := append(append([]*fakeHerdrWorkspace{}, f.workspaces[:from]...), f.workspaces[from+1:]...)
+		if to > from {
+			to--
+		}
+		f.workspaces = append(rest[:to], append([]*fakeHerdrWorkspace{w}, rest[to:]...)...)
+		list := []map[string]any{}
+		for _, w := range f.workspaces {
+			list = append(list, f.info(w))
+		}
+		return map[string]any{"type": "workspace_list", "workspaces": list}, nil
 	case "tab.create":
 		w := f.find(p.WorkspaceID)
 		if w == nil {
