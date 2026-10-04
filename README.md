@@ -46,7 +46,7 @@ review session, `reviews` with a `scratch` keepalive window; set
 | ending it from inside (`SelfClose`) | `exit`: a window goes with its last pane's process, `remain-on-exit` being off | `exit`: a workspace goes with its last pane's shell | `cmux workspace close`: the shell outlives the command by design, so the workspace has to be told |
 | grouping (`mux.Group`) | — the session already is the container | — no grouping in its API | a collapsible sidebar group, anchored on its first member |
 | watching (`mux.Watch`) | — nothing to listen to | — its stream is not read yet | `cmux events` over the socket: `States` then costs nothing |
-| reordering (`mux.Move`) | — windows are not reordered | `workspace.move`; the index is where the workspace ends up | — `reorder-workspace` exists, no driver for it yet |
+| reordering (`mux.Move`) | — `move-window` exists, no driver for it yet | `workspace.move`; the index is where the workspace ends up | — `reorder-workspace` exists, no driver for it yet |
 | transport | the `tmux` command | the session's socket, newline JSON | the `cmux` command, at `Socket` when the driver names one |
 
 `Group` is a capability, not a Driver verb: `mux.Group(d, name, ws,
@@ -69,7 +69,7 @@ a group of exactly the caller's workspace and one other; anything else
 keeps its generated anchor, because an untidy sidebar is recoverable
 and a closed workspace is not.
 
-`Watch` is the other capability. `mux.Watch(d, ctx)` returns a channel
+`Watch` is another capability. `mux.Watch(d, ctx)` returns a channel
 that signals whenever a later `States()` would answer differently, and
 `nil` for a driver without a stream — a nil channel blocks forever in a
 select, so a caller can keep a timer beside it and never branch on
@@ -111,6 +111,14 @@ subscription dropped for falling behind and a dead CLI all mean the
 same thing: read everything again. The reconnect is the driver's own
 rather than `cmux events --reconnect`, because a drop is exactly when
 the view may have missed something.
+
+`Move` is the third. `mux.Move(d, ws, index)` puts a workspace at an
+index of the order `Workspaces()` lists — counted after the move, so
+the index is where it ends up — and does nothing for a driver that
+cannot reorder. Only `Herdr` implements `Mover`: herdr's own
+`insert_index` counts from the order before the move, and the driver
+asks for one more when moving right. spaces uses it to put a workspace
+it makes later back where its file declares it.
 
 `States` speaks four words: `working`, `blocked` (a permission or a
 question waits), `done` (finished, not yet looked at), `idle`; `""` is
