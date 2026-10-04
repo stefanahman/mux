@@ -32,6 +32,7 @@ type FakeHerdr struct {
 	blocked    map[string]bool   // pane id → agent.prompt refuses
 	typed      map[string][]string
 	notes      []string
+	calls      map[string]int // method → requests answered
 }
 
 type fakeHerdrWorkspace struct {
@@ -72,6 +73,7 @@ func NewFakeHerdr(t testing.TB) *FakeHerdr {
 		agents:     map[string]string{},
 		blocked:    map[string]bool{},
 		typed:      map[string][]string{},
+		calls:      map[string]int{},
 	}
 	ln, err := net.Listen("unix", f.socket)
 	if err != nil {
@@ -182,9 +184,17 @@ func (f *FakeHerdr) paneInfo(w *fakeHerdrWorkspace, id string) map[string]any {
 	return map[string]any{"pane_id": id, "workspace_id": w.id, "tab_id": w.paneTab[id], "cwd": w.paneCwd[id], "agent": agent, "agent_status": f.info(w)["agent_status"]}
 }
 
+// Calls is how many requests for method the server has answered.
+func (f *FakeHerdr) Calls(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[method]
+}
+
 func (f *FakeHerdr) dispatch(method string, raw json.RawMessage) (any, *herdrError) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls[method]++
 	var p struct {
 		Cwd, Label, WorkspaceID, PaneID, TargetPaneID, Target, Text, Title, Body, Direction string
 		Focus                                                                               bool

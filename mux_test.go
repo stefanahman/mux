@@ -361,11 +361,15 @@ func TestHerdrMove(t *testing.T) {
 		{"c", 2, "bdca"},  // where it is already: nothing sent
 		{"b", -1, "bdca"}, // before the start: first, where it is
 	} {
+		before := fake.Calls("workspace.move")
 		if err := mux.Move(d, ws[c.name], c.index); err != nil {
 			t.Fatalf("Move(%s, %d): %v", c.name, c.index, err)
 		}
 		if got := order(); got != c.want {
 			t.Errorf("Move(%s, %d): order %s, want %s", c.name, c.index, got, c.want)
+		}
+		if sent := fake.Calls("workspace.move") - before; (c.name == "c" || c.name == "b") != (sent == 0) {
+			t.Errorf("Move(%s, %d) sent %d moves", c.name, c.index, sent)
 		}
 	}
 	if err := mux.Move(d, mux.Workspace{ID: "w99", Name: "gone"}, 0); err == nil {
