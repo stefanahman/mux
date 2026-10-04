@@ -391,6 +391,22 @@ func TestHerdrSession(t *testing.T) {
 	}
 }
 
+// TestHerdrSocketFollowsXDGConfigHome: herdr keeps its sockets under
+// $XDG_CONFIG_HOME/herdr when that is set (`XDG_CONFIG_HOME=/x herdr
+// --session s workspace list` names /x/herdr/sessions/s/herdr.sock), so
+// the driver looks there too.
+func TestHerdrSocketFollowsXDGConfigHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/cfg")
+	t.Setenv("HERDR_SOCKET_PATH", "")
+	t.Setenv("HERDR_SESSION", "")
+	if got := mux.NewHerdr("").Socket; got != "/cfg/herdr/herdr.sock" {
+		t.Errorf("default socket = %s", got)
+	}
+	if d := mux.NewHerdrSession("personal"); d.Socket != "/cfg/herdr/sessions/personal/herdr.sock" || d.Session() != "personal" {
+		t.Errorf("session socket = %s, session %q", d.Socket, d.Session())
+	}
+}
+
 func TestMoveIsOptional(t *testing.T) {
 	for _, d := range []mux.Driver{mux.Tmux{SessionName: "reviews"}, mux.Cmux{}} {
 		if err := mux.Move(d, mux.Workspace{ID: "W1", Name: "pr-1"}, 0); err != nil {

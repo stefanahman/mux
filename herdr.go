@@ -26,6 +26,17 @@ type Herdr struct {
 	Socket string
 }
 
+// herdrDir is where herdr keeps its sockets: $XDG_CONFIG_HOME/herdr,
+// else ~/.config/herdr — herdr's own choice, seen in the socket path it
+// names when no server answers.
+func herdrDir() string {
+	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
+		return filepath.Join(base, "herdr")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "herdr")
+}
+
 // NewHerdr finds the socket: the one given, else the one herdr gives
 // its panes (HERDR_SOCKET_PATH), else the default session's.
 func NewHerdr(socket string) Herdr {
@@ -33,8 +44,7 @@ func NewHerdr(socket string) Herdr {
 		socket = os.Getenv("HERDR_SOCKET_PATH")
 	}
 	if socket == "" {
-		home, _ := os.UserHomeDir()
-		socket = filepath.Join(home, ".config", "herdr", "herdr.sock")
+		socket = filepath.Join(herdrDir(), "herdr.sock")
 	}
 	return Herdr{Socket: expandHome(socket)}
 }
@@ -46,8 +56,7 @@ func NewHerdrSession(name string) Herdr {
 	if name == "" {
 		return NewHerdr("")
 	}
-	home, _ := os.UserHomeDir()
-	return Herdr{Socket: filepath.Join(home, ".config", "herdr", "sessions", name, "herdr.sock")}
+	return Herdr{Socket: filepath.Join(herdrDir(), "sessions", name, "herdr.sock")}
 }
 
 // HerdrError is an error herdr answered with; Code is what a caller

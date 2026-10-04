@@ -121,8 +121,9 @@ asks for one more when moving right. spaces uses it to put a workspace
 it makes later back where its file declares it.
 
 A named herdr session lives at `sessions/<name>/herdr.sock` beside the
-default session's socket; `mux.NewHerdrSession(name)` is its driver,
-and `Session()` reads the name back from that path.
+default session's socket, in `$XDG_CONFIG_HOME/herdr` (else
+`~/.config/herdr`) as herdr keeps them; `mux.NewHerdrSession(name)` is
+its driver, and `Session()` reads the name back from that path.
 
 `States` speaks four words: `working`, `blocked` (a permission or a
 question waits), `done` (finished, not yet looked at), `idle`; `""` is
