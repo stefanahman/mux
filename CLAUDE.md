@@ -71,7 +71,7 @@ first, the driver on top, the docs beside. No Co-Authored-By trailers.
 
 ## Document
 
-README.md has the table of what each driver does per verb; a
+docs/model.md has the table of what each driver does per verb; a
 behaviour change changes its row. The pill contract with claude-status
 — key `claude`, values working/blocked/done/idle, read with `cmux
 list-status --workspace <id>` — is shared: changing it changes
