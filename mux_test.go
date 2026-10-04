@@ -377,6 +377,20 @@ func TestHerdrMove(t *testing.T) {
 	}
 }
 
+// TestHerdrSession: a named session's socket is where Session reads
+// the name back from.
+func TestHerdrSession(t *testing.T) {
+	t.Setenv("HERDR_SESSION", "")
+	d := mux.NewHerdrSession("personal")
+	if !strings.HasSuffix(d.Socket, "/.config/herdr/sessions/personal/herdr.sock") || d.Session() != "personal" {
+		t.Errorf("NewHerdrSession(personal) = %s, session %q", d.Socket, d.Session())
+	}
+	t.Setenv("HERDR_SOCKET_PATH", "")
+	if def := mux.NewHerdrSession(""); def.Socket != mux.NewHerdr("").Socket || def.Session() != "default" {
+		t.Errorf("NewHerdrSession(\"\") = %s, session %q", def.Socket, def.Session())
+	}
+}
+
 func TestMoveIsOptional(t *testing.T) {
 	for _, d := range []mux.Driver{mux.Tmux{SessionName: "reviews"}, mux.Cmux{}} {
 		if err := mux.Move(d, mux.Workspace{ID: "W1", Name: "pr-1"}, 0); err != nil {

@@ -39,6 +39,17 @@ func NewHerdr(socket string) Herdr {
 	return Herdr{Socket: expandHome(socket)}
 }
 
+// NewHerdrSession is the driver for a named herdr session, whose socket
+// is sessions/<name>/herdr.sock beside the default session's — the
+// layout Session reads back. An empty name is NewHerdr's default.
+func NewHerdrSession(name string) Herdr {
+	if name == "" {
+		return NewHerdr("")
+	}
+	home, _ := os.UserHomeDir()
+	return Herdr{Socket: filepath.Join(home, ".config", "herdr", "sessions", name, "herdr.sock")}
+}
+
 // HerdrError is an error herdr answered with; Code is what a caller
 // can act on (agent_blocked, not_found, …).
 type HerdrError struct{ Code, Message string }
