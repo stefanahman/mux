@@ -30,7 +30,7 @@ there, and two of them do something this machine's `make` does not:
 |---|---|---|
 | `go` | ubuntu | `make lint`, then `make test` on the Go version in go.mod |
 | `macos` | macos | `make test` against Homebrew's tmux — the real driver, on the platform every consumer runs |
-| `analysis` | ubuntu, Go stable | `staticcheck@2026.2.1` and `govulncheck@v1.7.0` |
+| `analysis` | ubuntu | `staticcheck@2026.2.1` on Go 1.27.1, the last it can read, and `govulncheck@v1.7.0` on stable |
 
 `gh run list --workflow ci --branch main --limit 1` after a push.
 

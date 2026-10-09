@@ -33,8 +33,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # staticcheck 2026.2.1 cannot read go1.27.2's export data ("export
+      # data version 5 is greater than maximum supported version 4"), so
+      # it runs on the last Go it can. Back to stable with
+      # the staticcheck release that reads it.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.1
+      - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+      # govulncheck on stable: mux ships no binary, and the standard
+      # library a consumer gets is its own toolchain's.
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
