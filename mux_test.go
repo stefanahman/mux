@@ -510,7 +510,7 @@ func TestCmux(t *testing.T) {
 	}{
 		{"Terminal", true, nil},
 		{"~/Development/eden", true, nil},
-		{"…/Development/bardo/bardo-system", true, nil},
+		{"…/Development/work/app", true, nil},
 		{"/tmp", true, nil},
 		{"nvim", false, []string{"nvim"}},
 		{"cd /Users/x/src && nvim", false, []string{"cd", "src", "&&", "nvim"}},
